@@ -50,8 +50,9 @@ export async function structured<T extends z.ZodType>(options: {
   effort?: "low" | "medium" | "high";
   maxTokens?: number;
 }): Promise<z.infer<T>> {
+  const client = claude(); // throws ClaudeUnavailableError before we count anything
   await reserveLlmCall();
-  const response = await claude().beta.messages.parse({
+  const response = await client.beta.messages.parse({
     ...FALLBACK,
     model: COACH_MODEL,
     max_tokens: options.maxTokens ?? 16000,

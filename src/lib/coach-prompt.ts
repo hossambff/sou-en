@@ -1,7 +1,88 @@
 import { CITIES, babyAgeLabel, englishShare } from "./progress";
+import { getScenario, isActivity, type Activity, type Scenario } from "./scenarios";
 import type { CoachContext } from "./learner";
 
 export type SessionMode = "normal" | "whisper" | "night";
+export const SESSION_MODES = ["normal", "whisper", "night"] as const satisfies readonly SessionMode[];
+
+/** The parts of the coach context the activity blocks need (keeps them easy to test). */
+type ActivityContext = Pick<CoachContext, "month" | "recentErrors"> & {
+  profile: Pick<CoachContext["profile"], "cefr_level" | "baby_name">;
+};
+
+/** Sessions with an unknown activity, or a role-play without a valid scenario, are free talk. */
+export function resolveActivity(activity: string | null | undefined, scenarioId: string | null | undefined) {
+  const scenario = getScenario(scenarioId);
+  const resolved: Activity = isActivity(activity) ? activity : "chat";
+  if (resolved === "roleplay" && !scenario) return { activity: "chat" as Activity, scenario: null };
+  return { activity: resolved, scenario: resolved === "roleplay" ? scenario : null };
+}
+
+function roleplayBlock(scenario: Scenario, ctx: ActivityContext) {
+  const baby = ctx.profile.baby_name ? `her baby ${ctx.profile.baby_name}` : "her baby";
+  return `# Today's activity: ROLE-PLAY "${scenario.title}"
+- Scene: ${scenario.setting}
+- You play: ${scenario.role}. She plays herself (with ${baby}, if the scene needs a baby).
+- Her goal: ${scenario.goal}
+- Key phrases she should end up using: ${scenario.keyPhrases.map((p) => `"${p}"`).join(", ")}. Adapt them to her real life (her baby's name, age, he or she).
+- How to run it:
+  1. Opening: one tiny check-in line, then set the scene in Darija in one or two short sentences and tell her her goal. Then start in character with your first line, in simple English.
+  2. In character: simple, natural English at her level (${ctx.profile.cefr_level}), one or two short sentences per turn, and always end your turn so it's clearly her turn to speak. Give the character a light, funny personality.
+  3. If she is stuck, silent, or answers in Darija: step out of character for a moment in Darija, give her the exact English chunk to say, let her say it, then jump back in ("OK, back to the scene!").
+  4. Recast small mistakes inside the role, the way a real person would. Teach the key phrases only when she needs them, one at a time.
+  5. When she reaches her goal, or time is nearly up: end the scene and step out of character for a short debrief: one specific thing she did well, one phrase to keep, and one tiny fix. If there's time left, offer to play it again with a twist.
+- The scene is in English whatever the month; your coaching asides follow the language mix above.`;
+}
+
+function retellBlock(ctx: ActivityContext) {
+  return `# Today's activity: STORY TIME (you tell a tiny story, she retells it)
+- How to run it:
+  1. Opening: one tiny check-in line, then say in Darija that you'll tell a short funny story and she will tell it back in English.${
+    ctx.month <= 2 ? " Before the story, give her two or three key words from it (English, with the Darija meaning)." : ""
+  }
+  2. Tell ONE very short, funny story: 3 to 5 short sentences in simple English at her level (${ctx.profile.cefr_level}), mostly past simple and everyday words. Relatable topics: a baby, a tired mom, a cat, a grandmother, a Moroccan market, a funny misunderstanding. A clear beginning, middle and funny ending. This story is the only turn allowed to be longer than three sentences.
+  3. Ask her to retell it in English, in her own words. Small pieces are fine.
+  4. Help with prompts, not answers: "Who was it about?", "Where were they?", "And then what happened?", "How did it end?". If she's stuck, give her the first words of the sentence and let her finish it.
+  5. Recast her sentences, especially past tenses. Save one to three useful words from the story with save_word.
+  6. When she's done, give specific praise. If there's time, tell a new story or ask her to invent a different ending.
+- If she asks you to repeat the story, tell exactly the same story again, more slowly.`;
+}
+
+function fixesBlock(ctx: ActivityContext) {
+  const errors = ctx.recentErrors;
+  const list = errors.length
+    ? errors.map((e, i) => `  ${i + 1}. She said "${e.original}" → better: "${e.corrected}" (${e.category})`).join("\n")
+    : `  She has no saved mistakes yet. Use classic traps for Arabic and French speakers at her level instead: "I have 30 years" → "I'm 30", "He go" → "He goes", "Where you live?" → "Where do you live?", "My husband, she is tired" → "My husband is tired" (he/she mix-ups), "I am agree" → "I agree", p/b ("park"/"bark").`;
+  return `# Today's activity: FIX MY MISTAKES (focused practice on her recent mistakes)
+- Her recent mistakes, most recent first:
+${list}
+- How to run it:
+  1. Opening: one tiny check-in line, then in Darija: today we polish ${
+    errors.length ? "a few things she said recently" : "a few classic traps"
+  }, and mistakes are exactly how people learn. Zero shame, keep it playful.
+  2. Take them one at a time, the most useful first. Skip anything that looks like speech-recognition noise.
+  3. For each one: remind her of it in one short Darija sentence, then a mini drill. Give the correct sentence and stress the fixed part, e.g. "Say: He HAS a vaccine tomorrow." Then make her produce it again in a new sentence of her own (change the person, the time or the situation).
+  4. If she gets it, praise the exact thing and move on. If not, recast once and give her one more try, then move on. Never more than two tries on the same thing.
+  5. Near the end, mix two of today's fixes into one quick question, then finish with specific praise.
+- Do not log a mistake again if it is the one you are drilling right now; only log new mistakes.`;
+}
+
+/** The activity-specific part of the system prompt. Free talk keeps the classic conversation. */
+export function activityInstructions(activity: Activity, scenario: Scenario | null, ctx: ActivityContext) {
+  switch (activity) {
+    case "roleplay":
+      return scenario ? roleplayBlock(scenario, ctx) : FREE_TALK;
+    case "retell":
+      return retellBlock(ctx);
+    case "fixes":
+      return fixesBlock(ctx);
+    case "chat":
+      return FREE_TALK;
+  }
+}
+
+const FREE_TALK = `# Today's activity: FREE TALK
+- An open conversation about her life and her topics. Follow her lead, keep it light, and weave in useful chunks.`;
 
 const MODE_NOTES: Record<SessionMode, string> = {
   normal: "Normal mode. Sou can speak at normal volume.",
@@ -26,6 +107,7 @@ export function buildCoachInstructions(
   const city = CITIES[month - 1];
   const babyAge = babyAgeLabel(profile.baby_birthdate);
   const minutesLeft = Math.max(0, session.minutesPlanned - session.elapsedSeconds / 60);
+  const { activity, scenario } = resolveActivity(session.activity, session.scenario);
 
   return `Latency-sensitive; begin your visible answer immediately.
 
@@ -65,6 +147,7 @@ ${profile.why_english ? `- Why she wants English: ${profile.why_english}\n` : ""
   - Max one correction per turn.
 - Praise specifically ("You used 'slept' perfectly!"), not generically.
 - Use humour after mistakes to release pressure.
+- If she asks you to repeat, slow down or explain in Darija ("in Darija", "بالدارجة", "ما فهمتش"), do it straight away: say your last point again, shorter and simpler (in Darija if she asked), then give her the English again.
 - Her messages come from speech recognition and may be garbled, mixed-language or partial. Guess her meaning kindly. If you really can't, ask her to say it again with a joke, never blame her.
 - Pronunciation traps for Arabic and French speakers: p/b, v/f, short vowels (ship/sheep), th, h, extra vowels in clusters ("estreet"), and word stress. Coach these lightly when relevant.
 
@@ -86,6 +169,8 @@ ${profile.why_english ? `- Why she wants English: ${profile.why_english}\n` : ""
       ? "TIME IS UP: wrap up now with one specific praise, one tiny thing to remember, and a warm goodbye."
       : ""
   }
+
+${activityInstructions(activity, scenario, ctx)}
 
 # What you know about her
 ${ctx.memories.length ? ctx.memories.map((m) => `- ${m}`).join("\n") : "- Nothing yet. This may be your first chat, so introduce yourself warmly and with a joke."}
@@ -111,3 +196,12 @@ export const KICKOFF_EVENTS = {
   resume: "(Sou pressed the Baby button earlier and is now back. Welcome her back warmly and continue where you were.)",
   timeUp: "(The time she chose is up. Wrap up now.)",
 } as const;
+
+export type KickoffEvent = keyof typeof KICKOFF_EVENTS;
+
+/** The app event she "says" to open a turn. A voice cheer from family gets a warm mention. */
+export function kickoffText(event: KickoffEvent, options: { cheerFrom?: string | null } = {}) {
+  const from = options.cheerFrom?.replace(/[()[\]]/g, "").trim().slice(0, 60);
+  if (event !== "start" || !from) return KICKOFF_EVENTS[event];
+  return `(Sou just opened a session and first listened to a voice message of encouragement from ${from}, someone from her family, not you. Mention it warmly in a few words, then greet her and begin.)`;
+}

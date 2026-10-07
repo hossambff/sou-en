@@ -29,6 +29,8 @@ export async function POST(request: Request) {
   const settings = await queryOne<{ voice_id: string | null; speech_rate: number }>(
     `select voice_id, speech_rate from learner_profile order by created_at limit 1`,
   );
+  // "browser" = Sou chose the phone's built-in voice in Settings
+  if (settings?.voice_id === "browser") return new Response("Phone voice selected", { status: 501 });
   const options = {
     voiceId: settings?.voice_id,
     speed: (settings?.speech_rate ?? 0.95) * (slow ? 0.88 : 1),

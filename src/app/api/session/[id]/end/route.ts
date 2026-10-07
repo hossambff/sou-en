@@ -1,8 +1,12 @@
+import { after } from "next/server";
 import { z } from "zod";
 import { getLearnerUserId } from "@/lib/session";
 import { query, queryOne } from "@/lib/db";
 import { pointsForSession } from "@/lib/progress";
+import { notifySquadOfWin } from "@/lib/push";
 import { structured } from "@/lib/claude";
+import { resolveActivity } from "@/lib/coach-prompt";
+import { ACTIVITY_INFO } from "@/lib/scenarios";
 
 export const maxDuration = 60;
 
@@ -30,9 +34,9 @@ export async function POST(_request: Request, { params }: RouteContext<"/api/ses
   if (!z.string().uuid().safeParse(id).success) return new Response("Not found", { status: 404 });
 
   // Claim the session atomically so double-taps don't both run the recap
-  const session = await queryOne<{ id: string; speaking_seconds: number }>(
+  const session = await queryOne<{ id: string; speaking_seconds: number; activity: string; scenario: string | null }>(
     `update coach_session set ended_at = now() where id = $1 and user_id = $2 and ended_at is null
-     returning id, speaking_seconds`,
+     returning id, speaking_seconds, activity, scenario`,
     [id, userId],
   );
   if (!session) {
@@ -50,10 +54,11 @@ export async function POST(_request: Request, { params }: RouteContext<"/api/ses
   if (herTurns.length > 0) {
     try {
       const transcript = messages.map((m) => `${m.role === "user" ? "Sou" : "Coach"}: ${m.content}`).join("\n");
+      const { activity, scenario } = resolveActivity(session.activity, session.scenario);
+      const kind = scenario ? `${ACTIVITY_INFO[activity].title}: ${scenario.title}` : ACTIVITY_INFO[activity].title;
       recap = await structured({
         schema: recapSchema,
-        instructions:
-          "You review a voice English lesson between a coach and Sou, a Moroccan Darija-speaking learner. Sou's lines come from speech recognition, so ignore transcription noise and only flag real English mistakes.",
+        instructions: `You review a voice English lesson between a coach and Sou, a Moroccan Darija-speaking learner. This session's activity: ${kind}. In a role-play the coach plays a character, so only judge Sou's English. Sou's lines come from speech recognition, so ignore transcription noise and only flag real English mistakes.`,
         prompt: transcript,
         effort: "low",
       });
@@ -70,5 +75,9 @@ export async function POST(_request: Request, { params }: RouteContext<"/api/ses
     recap.summary,
     JSON.stringify(recap.goldenFixes),
   ]);
+  // Tell the Cheer Squad she practiced (max once a day, never at night) — after responding
+  if (points > 0) {
+    after(() => notifySquadOfWin(new Date(), userId).catch((error) => console.error("Squad notice failed", error)));
+  }
   return Response.json({ ok: true });
 }

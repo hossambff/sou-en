@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireUser } from "@/lib/session";
+import { requireLearner } from "@/lib/session";
 import { query, queryOne } from "@/lib/db";
 import { MoodPicker } from "./mood-picker";
 import { SpeakButton } from "@/components/speak-button";
@@ -8,8 +8,9 @@ import { SpeakButton } from "@/components/speak-button";
 type GoldenFix = { said: string; better: string; tip: string };
 
 export default async function RecapPage({ params }: PageProps<"/recap/[id]">) {
-  const user = await requireUser();
+  const { user } = await requireLearner();
   const { id } = await params;
+  if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const session = await queryOne<{
     speaking_seconds: number;
     points: number;
@@ -101,12 +102,29 @@ export default async function RecapPage({ params }: PageProps<"/recap/[id]">) {
 
         <MoodPicker sessionId={id} initial={session.mood} />
 
-        <Link
-          href="/"
-          className="block rounded-2xl bg-terra py-4 text-center text-lg font-medium text-white shadow-card active:scale-[0.98]"
-        >
-          Back home
-        </Link>
+        <div className="grid grid-cols-2 gap-3">
+          {session.golden_fixes.length > 0 ? (
+            <Link
+              href="/session?activity=fixes&minutes=3"
+              className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card active:scale-[0.98]"
+            >
+              ✨ Practice fixes
+            </Link>
+          ) : (
+            <Link
+              href="/practice"
+              className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card active:scale-[0.98]"
+            >
+              More practice
+            </Link>
+          )}
+          <Link
+            href="/"
+            className="rounded-2xl bg-terra py-4 text-center font-medium text-white shadow-card active:scale-[0.98]"
+          >
+            Back home
+          </Link>
+        </div>
       </div>
     </main>
   );

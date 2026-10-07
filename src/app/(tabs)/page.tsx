@@ -1,37 +1,76 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireLearner } from "@/lib/session";
-import { getDashboard, getProfile } from "@/lib/learner";
+import { getDashboard, getPlanContext, getProfile, localHour, localToday } from "@/lib/learner";
 import { CITIES, babyAgeLabel, levelFor, monthOfJourney } from "@/lib/progress";
+import { dayNumber, greetingFor } from "@/lib/plan";
+import { scenariosForLearner } from "@/lib/scenarios";
 import { StartPanel } from "@/components/start-panel";
 import { WeekRing } from "@/components/week-ring";
-import { SignOutButton } from "@/components/sign-out-button";
+import { QuickAsk } from "@/components/quick-ask";
+import { InstallHint } from "@/components/pwa/install-hint";
+
+function greetingEmoji(hour: number) {
+  if (hour >= 5 && hour < 12) return "☀️";
+  if (hour >= 12 && hour < 18) return "🌤️";
+  if (hour >= 18 && hour < 21) return "🌆";
+  return "🌙";
+}
 
 export default async function HomePage() {
   const { user } = await requireLearner();
   const profile = await getProfile(user.id);
   if (!profile) redirect("/onboarding");
 
-  const dash = await getDashboard(user.id, profile.started_on);
+  const [dash, planContext] = await Promise.all([
+    getDashboard(user.id, profile.started_on),
+    getPlanContext(user.id, profile.started_on),
+  ]);
   const month = monthOfJourney(profile.started_on);
   const level = levelFor(dash.points);
   const babyAge = babyAgeLabel(profile.baby_birthdate);
+  const hour = localHour();
+  const greeting = greetingFor(hour);
+  const scenarios = scenariosForLearner(profile.cefr_level, month)
+    .filter((item) => item.unlocked)
+    .map(({ scenario }) => ({ id: scenario.id, title: scenario.title, titleAr: scenario.titleAr, emoji: scenario.emoji }));
 
   return (
     <main className="zellige flex flex-1 flex-col px-4 pb-10 pt-[max(1.25rem,env(safe-area-inset-top))]">
       <div className="mx-auto w-full max-w-md space-y-4">
-        <header className="flex items-start justify-between pt-2 animate-rise">
-          <div>
-            <p className="font-display text-3xl font-semibold tracking-tight">Hi {profile.first_name}</p>
-            <p className="text-sm text-ink-soft">
-              {babyAge && profile.baby_name ? `${profile.baby_name} is ${babyAge} old · ` : ""}
-              {dash.practicedToday ? "You showed up today ✨" : "Even 3 minutes counts."}
-            </p>
-          </div>
-          <SignOutButton />
+        <header className="pt-2 animate-rise">
+          <p className="ar text-lg text-terra" dir="rtl">
+            {greeting.ar} {greetingEmoji(hour)}
+          </p>
+          <h1 className="font-display text-3xl font-semibold tracking-tight">
+            {greeting.en}, {profile.first_name}
+          </h1>
+          <p className="text-sm text-ink-soft">
+            {babyAge && profile.baby_name ? `${profile.baby_name} is ${babyAge} old · ` : ""}
+            {dash.practicedToday ? "You showed up today ✨" : "Even 3 minutes counts."}
+          </p>
         </header>
 
-        <StartPanel />
+        <InstallHint />
+
+        <StartPanel
+          defaultMinutes={profile.default_minutes ?? 5}
+          plan={{
+            hour,
+            month,
+            dueWords: dash.wordsDue,
+            recentMistakes: planContext.recentMistakes,
+            checkupDue: planContext.checkupDue,
+            firstCheckup: planContext.firstCheckup,
+            babyName: profile.baby_name,
+            doneToday: planContext.doneToday,
+            totalSessions: dash.sessions,
+            dayIndex: dayNumber(localToday()),
+            scenarios,
+          }}
+        />
+
+        <QuickAsk />
 
         <section className="grid grid-cols-2 gap-3 animate-rise [animation-delay:80ms]">
           <div className="rounded-3xl border border-line bg-card p-4 shadow-card">
@@ -53,7 +92,10 @@ export default async function HomePage() {
             </p>
           </div>
 
-          <div className="flex flex-col rounded-3xl border border-line bg-card p-4 shadow-card">
+          <Link
+            href="/progress"
+            className="flex flex-col rounded-3xl border border-line bg-card p-4 shadow-card transition active:scale-[0.99]"
+          >
             <p className="text-xs uppercase tracking-wider text-ink-soft">Voice points</p>
             <p className="font-display text-3xl font-semibold text-terra">{dash.points}</p>
             <p className="mt-auto text-sm font-medium">{level.title}</p>
@@ -63,17 +105,24 @@ export default async function HomePage() {
             <p className="mt-1 text-[11px] text-ink-soft">
               {level.next ? `${level.next.min - dash.points} to ${level.next.title}` : level.subtitle}
             </p>
-          </div>
+          </Link>
         </section>
 
         <Link
           href="/words"
-          className="flex items-center justify-between rounded-3xl border border-line bg-card p-4 shadow-card transition active:scale-[0.99] animate-rise [animation-delay:120ms]"
+          className="flex min-h-16 items-center justify-between rounded-3xl border border-line bg-card p-4 shadow-card transition active:scale-[0.99] animate-rise [animation-delay:120ms]"
         >
           <div className="flex items-center gap-3">
-            <span className="grid size-11 place-items-center rounded-2xl bg-mint-soft text-xl">🌱</span>
+            <span aria-hidden className="grid size-11 place-items-center rounded-2xl bg-mint-soft text-xl">
+              🌱
+            </span>
             <div>
-              <p className="font-medium">Word Garden</p>
+              <p className="font-medium">
+                Word Garden{" "}
+                <span className="ar text-sm font-normal text-ink-soft" dir="rtl">
+                  جنان الكلمات
+                </span>
+              </p>
               <p className="text-sm text-ink-soft">
                 {dash.words === 0
                   ? "Your first words will grow here"
@@ -81,15 +130,27 @@ export default async function HomePage() {
               </p>
             </div>
           </div>
-          <span className="text-ink-soft">›</span>
+          <span aria-hidden className="text-ink-soft">
+            ›
+          </span>
         </Link>
 
-        <section className="rounded-3xl border border-line bg-card p-4 shadow-card animate-rise [animation-delay:160ms]">
-          <div className="flex items-baseline justify-between">
-            <p className="font-medium">Your journey</p>
-            <p className="text-xs text-ink-soft">Month {month} · {CITIES[month - 1].theme}</p>
+        <Link
+          href="/progress"
+          className="block rounded-3xl border border-line bg-card p-4 shadow-card transition active:scale-[0.99] animate-rise [animation-delay:160ms]"
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="font-medium">
+              Your journey{" "}
+              <span className="ar text-sm font-normal text-ink-soft" dir="rtl">
+                الرحلة ديالك
+              </span>
+            </p>
+            <p className="text-xs text-ink-soft">
+              Month {month} · {CITIES[month - 1].theme}
+            </p>
           </div>
-          <ol className="mt-3 flex items-center justify-between">
+          <ol className="mt-3 flex items-center justify-between" aria-label={`Month ${month}: ${CITIES[month - 1].name}`}>
             {CITIES.map((city, i) => {
               const state = i + 1 < month ? "done" : i + 1 === month ? "here" : "ahead";
               return (
@@ -113,9 +174,9 @@ export default async function HomePage() {
             })}
           </ol>
           <p className="mt-3 text-xs text-ink-soft">
-            {dash.sessions} sessions · {dash.speakingMinutes} minutes of you speaking English
+            {dash.sessions} sessions · {dash.speakingMinutes} minutes of you speaking English · See your progress ›
           </p>
-        </section>
+        </Link>
       </div>
     </main>
   );

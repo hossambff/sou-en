@@ -81,3 +81,10 @@ export async function cachedSpeech(text: string, options: VoiceOptions = {}) {
   );
   return new Uint8Array(audio);
 }
+
+/** Should this learner hear the server voice? False when unconfigured or she picked the phone's voice. */
+export async function learnerUsesServerVoice(userId: string) {
+  if (!serverVoiceConfigured()) return false;
+  const row = await queryOne<{ voice_id: string | null }>(`select voice_id from learner_profile where user_id = $1`, [userId]);
+  return row?.voice_id !== "browser";
+}
