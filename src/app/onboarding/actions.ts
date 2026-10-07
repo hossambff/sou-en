@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { requireUser } from "@/lib/session";
+import { getMember, mayBeLearner, requireUser } from "@/lib/session";
 import { pool } from "@/lib/db";
 
 const learnerSchema = z.object({
@@ -14,6 +14,8 @@ const learnerSchema = z.object({
 
 export async function saveLearner(formData: FormData) {
   const user = await requireUser();
+  // Only Sou (LEARNER_EMAIL) can be the learner
+  if (!mayBeLearner(user.email)) redirect("/onboarding?as=partner");
   const data = learnerSchema.parse({
     firstName: formData.get("firstName"),
     babyName: formData.get("babyName") || undefined,
@@ -47,6 +49,9 @@ export async function saveLearner(formData: FormData) {
 
 export async function savePartner(formData: FormData) {
   const user = await requireUser();
+  // Never demote the learner (an accidental tap would hide her whole journey)
+  const existing = await getMember(user.id);
+  if (existing?.role === "learner" || (process.env.LEARNER_EMAIL && mayBeLearner(user.email))) redirect("/");
   const firstName = z.string().trim().min(1).max(60).parse(formData.get("firstName"));
   await pool.query(
     `insert into app_member (user_id, role, first_name) values ($1, 'partner', $2)

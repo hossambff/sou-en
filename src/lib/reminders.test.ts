@@ -162,6 +162,15 @@ describe("reminderMessage", () => {
     expect(reminderMessage(day(1))).toBe(reminderMessage(day(1 + REMINDER_MESSAGES.length)));
   });
 
+  it("never guilts her or promises something that may not be there", () => {
+    // They only go out on days she hasn't practiced yet (PRD: zero guilt about missed days)
+    for (const { ar, latin } of REMINDER_MESSAGES) {
+      expect(ar).not.toMatch(/فين|غبرتي|تعطلتي|نسيتي|جديدة/);
+      expect(latin.toLowerCase()).not.toMatch(/\bfin\b|ghbrti|nsiti|jdida|miss(ed)? you|where (were|have) you/);
+      expect(`${ar} ${latin}`.toLowerCase()).not.toMatch(/new word|waiting for you/);
+    }
+  });
+
   it("follows her Darija script preference", () => {
     expect(reminderMessage("2026-10-07", "arabic")).toMatch(/[؀-ۿ]/);
     expect(reminderMessage("2026-10-07", "latin")).not.toMatch(/[؀-ۿ]/);

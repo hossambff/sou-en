@@ -121,7 +121,8 @@ export const CEFR_INFO: Record<CefrBand, { title: string; ar: string; canDo: str
   A2: { title: "Everyday basics", ar: "الأساسيات ديال كل نهار", canDo: "Talk about your family, your day and simple needs." },
   B1: { title: "On your own", ar: "كتدبري راسك", canDo: "Tell stories, explain plans and handle most daily situations." },
   B2: { title: "Confident", ar: "واثقة فراسك", canDo: "Chat easily with native speakers about lots of topics." },
-  C1: { title: "Fluent", ar: "طليقة", canDo: "Express yourself naturally and precisely, even on complex topics." },
+  // Not "طليقة": on its own it reads as "divorcée" in Darija.
+  C1: { title: "Fluent", ar: "كتهضري بحرية", canDo: "Express yourself naturally and precisely, even on complex topics." },
 };
 
 export function isCefrBand(value: unknown): value is CefrBand {
@@ -229,7 +230,7 @@ export const STORY_THEMES = [
   { id: "cat", label: "A little cat", ar: "مشيشة صغيرة", emoji: "🐱" },
   { id: "sea", label: "The sea", ar: "البحر", emoji: "🌊" },
   { id: "garden", label: "The garden", ar: "الجنان", emoji: "🌳" },
-  { id: "surprise", label: "Surprise me", ar: "فاجئني", emoji: "🎁" },
+  { id: "surprise", label: "Surprise me", ar: "دير ليا سوربريز", emoji: "🎁" },
 ] as const;
 export type StoryThemeId = (typeof STORY_THEMES)[number]["id"];
 

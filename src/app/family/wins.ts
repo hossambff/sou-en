@@ -65,6 +65,11 @@ export function timeAgo(then: Date, now = new Date()) {
 }
 
 export type WinStats = {
+  /** Finished conversations with Hossam: chat, role-play, retell, fixes. */
+  chats: number;
+  /** Finished drills (Shadow Me, word review). */
+  drills: number;
+  /** Finished practice sessions of any kind except the monthly check-up. */
   sessions: number;
   daysPracticed: number;
   nightSessions: number;
@@ -80,15 +85,17 @@ export type Badge = { id: string; emoji: string; title: string; earned: boolean 
 /** Small, cheap badges for the squad view. Earned first; a couple of next ones to look forward to. */
 export function squadBadges(stats: WinStats) {
   const all: Badge[] = [
-    { id: "first-chat", emoji: "💬", title: "First chat with Hossam", earned: stats.sessions >= 1 },
+    // Only a real conversation earns this one: not a drill, not the day-1 check-up
+    { id: "first-chat", emoji: "💬", title: "First chat with Hossam", earned: stats.chats >= 1 },
     { id: "goal-week", emoji: "🎯", title: "Weekly goal reached", earned: stats.weekGoalReached },
     { id: "roleplay", emoji: "🎭", title: "First role-play", earned: stats.roleplays >= 1 },
+    { id: "first-drill", emoji: "🦜", title: "First drill", earned: stats.drills >= 1 },
     { id: "two-minutes", emoji: "🗣️", title: "2+ minutes talking in one go", earned: stats.bestSeconds >= 120 },
     { id: "night-owl", emoji: "🦉", title: "Night Owl Scholar", earned: stats.nightSessions >= 1 },
     { id: "whisper", emoji: "🤫", title: "Whisper Queen", earned: stats.whisperSessions >= 1 },
     { id: "words-10", emoji: "🌱", title: "10 words planted", earned: stats.words >= 10 },
     { id: "days-7", emoji: "📅", title: "Showed up on 7 days", earned: stats.daysPracticed >= 7 },
-    { id: "sessions-10", emoji: "🔟", title: "10 sessions", earned: stats.sessions >= 10 },
+    { id: "sessions-10", emoji: "🔟", title: "10 practice sessions", earned: stats.sessions >= 10 },
     { id: "words-50", emoji: "🌿", title: "50 words planted", earned: stats.words >= 50 },
     { id: "days-30", emoji: "🏅", title: "Showed up on 30 days", earned: stats.daysPracticed >= 30 },
     { id: "words-100", emoji: "🌷", title: "100 words planted", earned: stats.words >= 100 },

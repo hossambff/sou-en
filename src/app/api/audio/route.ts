@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getMember, getUser } from "@/lib/session";
-import { saveClip } from "@/lib/audio-store";
+import { ClipRejectedError, saveClip } from "@/lib/audio-store";
 
 export const maxDuration = 30;
 
@@ -23,6 +23,8 @@ export async function POST(request: Request) {
     const id = await saveClip(user.id, kind.data, audio, seconds);
     return Response.json({ id });
   } catch (error) {
-    return new Response(error instanceof Error ? error.message : "Upload failed", { status: 400 });
+    if (error instanceof ClipRejectedError) return new Response(error.message, { status: 400 });
+    console.error("Clip upload failed", error);
+    return new Response("Upload failed", { status: 500 });
   }
 }

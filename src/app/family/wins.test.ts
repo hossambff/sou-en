@@ -58,6 +58,8 @@ describe("timeAgo", () => {
 
 describe("squadBadges", () => {
   const none: WinStats = {
+    chats: 0,
+    drills: 0,
     sessions: 0,
     daysPracticed: 0,
     nightSessions: 0,
@@ -75,10 +77,21 @@ describe("squadBadges", () => {
   });
 
   it("awards what she's done", () => {
-    const badges = squadBadges({ ...none, sessions: 12, nightSessions: 1, words: 55, daysPracticed: 8 });
+    const badges = squadBadges({ ...none, chats: 9, drills: 3, sessions: 12, nightSessions: 1, words: 55, daysPracticed: 8 });
     const ids = badges.earned.map((b) => b.id);
-    expect(ids).toEqual(expect.arrayContaining(["first-chat", "sessions-10", "night-owl", "words-10", "words-50", "days-7"]));
+    expect(ids).toEqual(
+      expect.arrayContaining(["first-chat", "first-drill", "sessions-10", "night-owl", "words-10", "words-50", "days-7"]),
+    );
     expect(ids).not.toContain("whisper");
     expect(badges.next.every((b) => !b.earned)).toBe(true);
+  });
+
+  it("only awards 'First chat with Hossam' for a real conversation, not a drill or check-up", () => {
+    const drillsOnly = squadBadges({ ...none, drills: 2, sessions: 2 }).earned.map((b) => b.id);
+    expect(drillsOnly).toContain("first-drill");
+    expect(drillsOnly).not.toContain("first-chat");
+    // The day-1 check-up alone (not counted in chats, drills or practice sessions) earns nothing
+    expect(squadBadges(none).earned).toEqual([]);
+    expect(squadBadges({ ...none, chats: 1, sessions: 1 }).earned.map((b) => b.id)).toEqual(["first-chat"]);
   });
 });

@@ -36,7 +36,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
     return (
       <div className="mt-8 space-y-4 text-center">
         <p className="rounded-2xl bg-mint-soft px-4 py-3 text-sm text-mint">All set! Your new password is saved 🎉</p>
-        <Link href="/login" className="block w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98]">
+        <Link href="/login" className="block w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98]">
           Sign in
         </Link>
       </div>
@@ -53,7 +53,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
       {error && <p className="rounded-xl bg-terra-soft px-4 py-2.5 text-sm text-terra-deep">{error}</p>}
       <button
         disabled={busy}
-        className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98] disabled:opacity-60"
+        className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98] disabled:opacity-60"
       >
         {busy ? "…" : "Save new password"}
       </button>

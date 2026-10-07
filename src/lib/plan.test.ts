@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildPlan, dayNumber, greetingFor, isNight, planMinutes, type PlanInput } from "./plan";
+import { buildPlan, dayNumber, greetingFor, greetingLine, isNight, planMinutes, type PlanInput } from "./plan";
+import { isNightHour } from "./time-of-day";
 
 const base: PlanInput = {
   minutes: 5,
@@ -123,14 +124,25 @@ describe("time helpers", () => {
   it("greets by time of day in Darija", () => {
     expect(greetingFor(8).ar).toBe("صباح الخير");
     expect(greetingFor(15).ar).toBe("مسا الخير");
-    expect(greetingFor(23).ar).toBe("تصبحي على خير");
-    expect(greetingFor(3).en).toBe("Good night");
+    expect(greetingFor(21)).toMatchObject({ en: "Good evening", ar: "مسا الخير" });
+    expect(greetingFor(22).en).toBe("Good evening");
   });
 
-  it("knows when it's night", () => {
+  it("never says 'Good night' as a hello (it's a goodbye)", () => {
+    for (let hour = 0; hour < 24; hour++) {
+      expect(greetingFor(hour).en).not.toMatch(/good night/i);
+      expect(greetingFor(hour).ar).not.toContain("تصبحي على خير");
+    }
+    expect(greetingLine(3, "Sou")).toBe("Still up, Sou?");
+    expect(greetingFor(3).ar).toBe("باقا فايقة؟");
+    expect(greetingLine(19, "Sou")).toBe("Good evening, Sou");
+  });
+
+  it("knows when it's night, with the same hours as the Home button", () => {
     expect(isNight(22)).toBe(true);
     expect(isNight(5)).toBe(true);
     expect(isNight(6)).toBe(false);
+    for (let hour = 0; hour < 24; hour++) expect(isNight(hour)).toBe(isNightHour(hour));
   });
 
   it("numbers days stably", () => {
@@ -150,5 +162,18 @@ describe("modes in links", () => {
   it("keeps plain drill links in normal mode", () => {
     const review = buildPlan({ ...base, dueWords: 3 }).find((bite) => bite.id === "review");
     expect(review?.href).toBe("/drill/review");
+  });
+
+  it("uses night mode at night when she hasn't picked a mode", () => {
+    const plan = buildPlan({ ...base, hour: 22, minutes: 10, dueWords: 3 });
+    expect(plan.find((bite) => bite.id === "review")?.href).toBe("/drill/review?mode=night");
+    const chat = plan.find((bite) => bite.id === "chat");
+    if (chat) expect(chat.href).toContain("mode=night");
+  });
+
+  it("honours an explicit Normal, even at night", () => {
+    const plan = buildPlan({ ...base, hour: 1, minutes: 10, dueWords: 3, mode: "normal" });
+    for (const bite of plan) expect(bite.href).not.toContain("mode=night");
+    expect(plan.find((bite) => bite.id === "review")?.href).toBe("/drill/review");
   });
 });

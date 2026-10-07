@@ -100,6 +100,28 @@ describe("Sou's milestones", () => {
     expect(byId("mom-city-3")).toBeUndefined();
   });
 
+  it("counts only a real conversation as the first chat, not the day-1 check-up or a drill", () => {
+    const timeline = momTimeline(
+      {
+        ...emptyFacts,
+        sessions: [
+          { date: "2026-10-01", at: "2026-10-01T09:00:00Z", seconds: 150, points: 25, activity: "checkup" },
+          { date: "2026-10-02", at: "2026-10-02T09:00:00Z", seconds: 60, points: 16, activity: "shadow" },
+          { date: "2026-10-04", at: "2026-10-04T09:00:00Z", seconds: 90, points: 19, activity: "retell" },
+        ],
+      },
+      "2026-10-07",
+    );
+    expect(timeline.find((i) => i.id === "mom-first-session")).toMatchObject({ date: "2026-10-04", title: "First chat with Hossam" });
+    expect(timeline.find((i) => i.id === "mom-first-drill")?.date).toBe("2026-10-02");
+
+    const checkupOnly = momTimeline(
+      { ...emptyFacts, sessions: [{ date: "2026-10-01", at: "2026-10-01T09:00:00Z", seconds: 150, points: 25, activity: "checkup" }] },
+      "2026-10-07",
+    );
+    expect(checkupOnly.map((i) => i.id)).toEqual(["mom-start"]);
+  });
+
   it("works for a brand-new learner", () => {
     expect(momTimeline(emptyFacts, "2026-10-07").map((i) => i.id)).toEqual(["mom-start"]);
   });

@@ -6,7 +6,8 @@ import { authClient } from "@/lib/auth-client";
 
 type Mode = "signin" | "signup" | "forgot";
 
-export function LoginForm() {
+/** `resetEnabled`: password-reset emails are configured (EMAIL_ENABLED=1). Otherwise the link stays hidden. */
+export function LoginForm({ resetEnabled = false }: { resetEnabled?: boolean }) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("signin");
   const [error, setError] = useState<string | null>(null);
@@ -86,11 +87,11 @@ export function LoginForm() {
       {notice && <p className="rounded-xl bg-mint-soft px-4 py-2.5 text-sm text-mint">{notice}</p>}
       <button
         disabled={busy}
-        className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98] disabled:opacity-60"
+        className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98] disabled:opacity-60"
       >
         {busy ? "…" : mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Send me a reset link"}
       </button>
-      {mode === "signin" && (
+      {mode === "signin" && resetEnabled && (
         <button
           type="button"
           onClick={() => switchTo("forgot")}

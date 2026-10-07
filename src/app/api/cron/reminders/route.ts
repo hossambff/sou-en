@@ -1,5 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { notifySquadOfWin, pushConfigured, runDailyReminders } from "@/lib/push";
+import { closeAllStaleSessions } from "@/lib/session-maintenance";
+import { deleteOrphanClips } from "@/lib/audio-store";
+import { query } from "@/lib/db";
 
 export const maxDuration = 60;
 
@@ -18,10 +21,18 @@ function authorized(request: Request) {
  */
 export async function GET(request: Request) {
   if (!authorized(request)) return new Response("Unauthorized", { status: 401 });
-  if (!pushConfigured()) return Response.json({ ok: true, skipped: "push is not configured" });
-
   const now = new Date();
+
+  // Housekeeping that runs every hour, even when push isn't configured
+  const closedSessions = (await closeAllStaleSessions()).length; // sessions she left without tapping Finish
+  const orphanClips = await deleteOrphanClips(); // abandoned uploads
+  await query(`delete from tts_cache where created_at < now() - interval '90 days'`);
+  const housekeeping = { closedSessions, orphanClips };
+
+  if (!pushConfigured()) {
+    return Response.json({ ok: true, at: now.toISOString(), housekeeping, skipped: "push is not configured" });
+  }
   const reminders = await runDailyReminders(now);
   const squad = await notifySquadOfWin(now);
-  return Response.json({ ok: true, at: now.toISOString(), reminders, squad });
+  return Response.json({ ok: true, at: now.toISOString(), housekeeping, reminders, squad });
 }

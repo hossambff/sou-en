@@ -2,32 +2,29 @@
 
 import { useEffect, useState } from "react";
 import { currentPlatform, isStandalone } from "./platform";
+import { currentSubscription, forgetOnServer, saveOnServer } from "./push-device";
 import { ensureServiceWorker, pushSupported, urlBase64ToUint8Array } from "./service-worker";
 
-type State = "loading" | "unsupported" | "needs-install" | "unconfigured" | "denied" | "off" | "on";
+/** "other": this browser is subscribed, but for another family member's account. */
+type State = "loading" | "unsupported" | "needs-install" | "unconfigured" | "denied" | "off" | "other" | "on";
 
 const VAPID_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? "";
-
-async function saveOnServer(subscription: PushSubscription) {
-  const response = await fetch("/api/push/subscribe", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(subscription.toJSON()),
-  });
-  if (!response.ok) throw new Error(`Couldn't save the subscription (${response.status})`);
-}
 
 async function detectState(): Promise<State> {
   if (!VAPID_KEY) return "unconfigured";
   if (!pushSupported()) return currentPlatform() === "ios" && !isStandalone() ? "needs-install" : "unsupported";
   if (Notification.permission === "denied") return "denied";
   if (Notification.permission !== "granted") return "off";
-  const registration = await navigator.serviceWorker.getRegistration("/");
-  const subscription = await registration?.pushManager.getSubscription();
+  const subscription = await currentSubscription();
   if (!subscription) return "off";
-  // Keep the server copy in sync (it may have been cleaned up after the browser rotated keys)
-  await saveOnServer(subscription).catch(() => {});
-  return "on";
+  // Keep the server copy in sync (it may have been cleaned up after the browser rotated keys).
+  // This never moves the device away from another member: that needs an explicit tap on the switch.
+  const outcome = await saveOnServer(subscription).catch(() => "saved" as const);
+  return outcome === "other-account" ? "other" : "on";
+}
+
+async function subscribeFresh(registration: ServiceWorkerRegistration) {
+  return registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_KEY) });
 }
 
 type Props = {
@@ -64,13 +61,15 @@ export function PushToggle({ audience }: Props) {
         return;
       }
       const registration = await ensureServiceWorker();
-      const subscription =
-        (await registration.pushManager.getSubscription()) ??
-        (await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(VAPID_KEY),
-        }));
-      await saveOnServer(subscription);
+      const existing = await registration.pushManager.getSubscription();
+      let outcome = await saveOnServer(existing ?? (await subscribeFresh(registration)));
+      if (outcome === "other-account" && existing) {
+        // They chose, on this very phone, to get notifications here: start a brand-new subscription.
+        // The old one (another member's) stops working on this device.
+        await existing.unsubscribe();
+        outcome = await saveOnServer(await subscribeFresh(registration));
+      }
+      if (outcome !== "saved") throw new Error("This device is still linked to another account");
       setState("on");
     } catch (error) {
       console.error(error);
@@ -84,14 +83,9 @@ export function PushToggle({ audience }: Props) {
     setBusy(true);
     setMessage(null);
     try {
-      const registration = await navigator.serviceWorker.getRegistration("/");
-      const subscription = await registration?.pushManager.getSubscription();
+      const subscription = await currentSubscription();
       if (subscription) {
-        await fetch("/api/push/subscribe", {
-          method: "DELETE",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ endpoint: subscription.endpoint }),
-        });
+        await forgetOnServer(subscription.endpoint);
         await subscription.unsubscribe();
       }
       setState("off");
@@ -120,6 +114,7 @@ export function PushToggle({ audience }: Props) {
       unconfigured: "Notifications aren't set up on the server yet.",
       denied: "Notifications are blocked. Allow them for Sou Coach in your phone's settings, then come back.",
       off: audience === "learner" ? "Off on this phone. Hossam can't nudge you yet." : "Off on this phone.",
+      other: "This phone gets notifications for another family account. Turn them on to get yours here instead.",
       on:
         audience === "learner"
           ? "On for this phone. Max one a day, never at night."
@@ -138,7 +133,7 @@ export function PushToggle({ audience }: Props) {
           </p>
           <p className="text-xs text-ink-soft">{subtitle}</p>
         </div>
-        {(state === "off" || state === "on") && (
+        {(state === "off" || state === "other" || state === "on") && (
           <button
             role="switch"
             aria-checked={state === "on"}

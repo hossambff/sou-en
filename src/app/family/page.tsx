@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { getLearnerMember, requirePartner } from "@/lib/session";
+import Link from "next/link";
+import { getLearnerMember, mayBeLearner, requirePartner } from "@/lib/session";
 import { babyAgeLabel } from "@/lib/progress";
 import { WeekRing } from "@/components/week-ring";
 import { SignOutButton } from "@/components/sign-out-button";
@@ -17,6 +18,9 @@ export default async function FamilyPage() {
   const { user, member } = await requirePartner();
   const learner = await getLearnerMember();
   const [view, cheers] = await Promise.all([learner ? getSquadView(learner.user_id) : null, getSentCheers(user.id)]);
+  // Sou switched to the squad by mistake ("Not Sou?" on her profile)? Offer her way back: only to the
+  // LEARNER_EMAIL account, or (no LEARNER_EMAIL) while nobody is the learner yet.
+  const canBecomeLearner = mayBeLearner(user.email) && (Boolean(process.env.LEARNER_EMAIL?.trim()) || !learner);
 
   return (
     <main className="zellige flex flex-1 flex-col px-4 pb-12 pt-[max(1.25rem,env(safe-area-inset-top))]">
@@ -61,7 +65,16 @@ export default async function FamilyPage() {
           </p>
         </section>
 
-        <InstallHint placement="home" />
+        <InstallHint placement="home" audience="partner" />
+
+        {canBecomeLearner && (
+          <Link
+            href="/onboarding?as=learner"
+            className="flex min-h-11 items-center justify-center gap-1 py-3 text-center text-sm text-ink-soft underline-offset-4 hover:underline"
+          >
+            I&apos;m {member.first_name}, the one learning. Take me back to my coach →
+          </Link>
+        )}
       </div>
     </main>
   );
@@ -165,11 +178,14 @@ function Badges({ view }: { view: View }) {
   const { earned, next } = view.badges;
   return (
     <section className="rounded-3xl border border-line bg-card p-4 shadow-card animate-rise [animation-delay:160ms]">
-      <h2 className="font-medium">Her badges</h2>
-      <ul className="mt-3 flex flex-wrap gap-2">
+      <h2 id="her-badges" className="font-medium">
+        Her badges
+      </h2>
+      <ul aria-labelledby="her-badges" className="mt-3 flex flex-wrap gap-2">
         {earned.map((badge) => (
           <li key={badge.id} className="flex items-center gap-1.5 rounded-full bg-saffron-soft px-3 py-1.5 text-sm">
             <span aria-hidden>{badge.emoji}</span> {badge.title}
+            <span className="sr-only"> (earned)</span>
           </li>
         ))}
         {next.map((badge) => (
@@ -181,6 +197,8 @@ function Badges({ view }: { view: View }) {
               {badge.emoji}
             </span>{" "}
             {badge.title}
+            {/* Dashed + grey is only visual: say it for screen readers too */}
+            <span className="sr-only"> (not yet, coming next)</span>
           </li>
         ))}
       </ul>

@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { Speaker } from "@/lib/voice/speaker";
-import { Listener, type ListenOptions, type Utterance } from "@/lib/voice/listener";
+import { Listener, type ListenOptions, type ListenResult } from "@/lib/voice/listener";
+import { MIC_NOTICE, type Notice } from "./listen-notice";
 
 export type DrillMode = "normal" | "whisper" | "night";
 
@@ -10,7 +11,18 @@ export type DrillMode = "normal" | "whisper" | "night";
  * Hossam's voice + Sou's mic for a drill. Phrases use the cached server voice (saves quota),
  * falling back to the phone's voice.
  */
-export function useDrillVoice({ serverVoice, serverStt, mode }: { serverVoice: boolean; serverStt: boolean; mode: DrillMode }) {
+export function useDrillVoice({
+  serverVoice,
+  serverStt,
+  mode,
+  speechRate,
+}: {
+  serverVoice: boolean;
+  serverStt: boolean;
+  mode: DrillMode;
+  /** Her Settings speed, so the phone-voice fallback matches it (🐢 slow multiplies on top). */
+  speechRate: number;
+}) {
   const speaker = useRef<Speaker | null>(null);
   const listener = useRef<Listener | null>(null);
 
@@ -28,6 +40,7 @@ export function useDrillVoice({ serverVoice, serverStt, mode }: { serverVoice: b
       speaker.current = new Speaker(serverVoice, true);
       speaker.current.volume = mode === "night" ? 0.6 : mode === "whisper" ? 0.8 : 1;
     }
+    speaker.current.rate = speechRate;
     speaker.current.unlock();
     listener.current ??= new Listener(serverStt);
     try {
@@ -36,13 +49,14 @@ export function useDrillVoice({ serverVoice, serverStt, mode }: { serverVoice: b
     } catch {
       return false;
     }
-  }, [serverVoice, serverStt, mode]);
+  }, [serverVoice, serverStt, mode, speechRate]);
 
-  /** Say one phrase and wait until it's done (or stopped). */
+  /** Say one phrase and wait until it's done (or stopped). Drops any listen still running ("🔊 again" mid-answer). */
   const say = useCallback(
     async (text: string, slow = false) => {
       const voice = speaker.current;
       if (!voice) return;
+      listener.current?.cancel();
       voice.stop();
       voice.slow = slow || mode === "night";
       voice.enqueue(text);
@@ -51,9 +65,12 @@ export function useDrillVoice({ serverVoice, serverStt, mode }: { serverVoice: b
     [mode],
   );
 
+  /** What she said, silence, or a failure to explain (see listenNotice). Never throws. */
   const hear = useCallback(
-    (options: Omit<ListenOptions, "whisper">): Promise<Utterance | null> =>
-      listener.current ? listener.current.listen({ whisper: mode === "whisper", ...options }) : Promise.resolve(null),
+    (options: Omit<ListenOptions, "whisper">): Promise<ListenResult> =>
+      listener.current
+        ? listener.current.hear({ whisper: mode === "whisper", ...options })
+        : Promise.resolve({ kind: "silence" } as const),
     [mode],
   );
 
@@ -120,7 +137,11 @@ function OrbIcon({ state }: { state: OrbState }) {
     return (
       <span className="flex gap-1.5">
         {[0, 150, 300].map((delay) => (
-          <span key={delay} className="size-2.5 animate-bounce rounded-full bg-white" style={{ animationDelay: `${delay}ms` }} />
+          <span
+            key={delay}
+            className="size-2.5 animate-bounce rounded-full bg-white motion-reduce:animate-none"
+            style={{ animationDelay: `${delay}ms` }}
+          />
         ))}
       </span>
     );
@@ -147,7 +168,7 @@ export function ProgressDots({ total, index, results }: { total: number; index: 
         const score = results[i];
         const color =
           score == null ? (i === index ? "bg-terra" : "bg-line") : score >= 75 ? "bg-mint" : score >= 50 ? "bg-saffron" : "bg-terra-soft";
-        return <li key={i} className={`h-2 rounded-full transition-all ${color} ${i === index ? "w-6" : "w-2"}`} />;
+        return <li key={i} className={`h-2 rounded-full transition-all motion-reduce:transition-none ${color} ${i === index ? "w-6" : "w-2"}`} />;
       })}
     </ol>
   );
@@ -172,7 +193,7 @@ export function ScoreRing({ score, size = 88 }: { score: number; size?: number }
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={circumference * (1 - Math.max(0, Math.min(100, score)) / 100)}
-          className="transition-[stroke-dashoffset] duration-700"
+          className="transition-[stroke-dashoffset] duration-700 motion-reduce:transition-none"
         />
       </svg>
       <span className="font-display text-2xl font-semibold tabular-nums">{score}</span>
@@ -192,7 +213,19 @@ export function DrillMain({ night, children }: { night: boolean; children: React
   );
 }
 
-export const MIC_HELP = "I need the microphone to hear you. Please allow it in your browser settings 🎙️";
+export const MIC_HELP: Notice = MIC_NOTICE;
+
+/** A gentle bilingual note under the orb (mic refused, not heard clearly, can't listen right now). */
+export function NoticeText({ notice, className = "" }: { notice: Notice; className?: string }) {
+  return (
+    <p className={`max-w-xs text-center text-sm text-terra ${className}`} role="status">
+      {notice.en}
+      <span className="ar block text-ink-soft" dir="rtl">
+        {notice.ar}
+      </span>
+    </p>
+  );
+}
 
 /** A v4 UUID for one drill round (randomUUID needs a secure context, so fall back to getRandomValues). */
 export function newRunId(): string {

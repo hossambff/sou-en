@@ -3,19 +3,14 @@ import { z } from "zod";
 import { query, queryOne } from "@/lib/db";
 import { loadClip } from "@/lib/audio-store";
 import { structured } from "@/lib/claude";
-import { bumpUsage } from "@/lib/usage";
+import { bumpUsage, getUsage, DAILY_STT_LIMIT } from "@/lib/usage";
 import { getProfile } from "@/lib/learner";
 import { CEFR_BANDS, CHECKUP_PROMPTS, babyAgeLabel, isCefrBand, monthOfJourney, normalizeScores, type RubricScores } from "@/lib/progress";
+import { needsServerTranscript, type CheckupAnswer } from "./answers";
 
-export type CheckupAnswer = { prompt: string; transcript: string; clipId: string | null; seconds: number };
+export { answerSchema, needsServerTranscript, type CheckupAnswer } from "./answers";
+
 export type CheckupReport = { strengths: string[]; focus: string[]; message: string; messageAr: string };
-
-export const answerSchema = z.object({
-  prompt: z.enum(CHECKUP_PROMPTS.map((p) => p.id) as [string, ...string[]]),
-  transcript: z.string().max(4000).default(""),
-  clipId: z.string().uuid().nullable().default(null),
-  seconds: z.number().min(0).max(120).default(0),
-});
 
 const rubricItem = z.object({
   score: z.number().describe("Whole number from 1 (very limited) to 5 (strong)"),
@@ -61,11 +56,17 @@ If a previous check-up is given, celebrate specific growth since then.
 Message: warm, calm and a little witty, like a supportive big brother. No guilt, no comparisons with other people.`;
 
 const STT_MODEL = process.env.ELEVENLABS_STT_MODEL ?? "scribe_v2";
+/** Same daily cap as /api/stt (paid ElevenLabs calls). */
+const STT_TIMEOUT_MS = 20_000;
 
-/** Server-side transcription of a saved clip (used when the browser couldn't transcribe). */
-async function transcribeClip(clipId: string, userId: string) {
+/**
+ * Server-side transcription of a saved clip (used when the phone couldn't transcribe).
+ * null = not attempted (no key, daily limit reached, ElevenLabs down): a later retry may try again.
+ */
+async function transcribeClip(clipId: string, userId: string): Promise<string | null> {
   const apiKey = process.env.ELEVENLABS_API_KEY;
-  if (!apiKey) return "";
+  if (!apiKey) return null;
+  if ((await getUsage("stt_calls")) >= DAILY_STT_LIMIT) return null;
   const clip = await loadClip(clipId);
   if (!clip || clip.user_id !== userId) return "";
   const form = new FormData();
@@ -77,13 +78,16 @@ async function transcribeClip(clipId: string, userId: string) {
       method: "POST",
       headers: { "xi-api-key": apiKey },
       body: form,
+      signal: AbortSignal.timeout(STT_TIMEOUT_MS),
     });
-    await bumpUsage("stt_calls", 1);
-    if (!response.ok) return "";
+    if (!response.ok) return null;
     const data = (await response.json()) as { text?: string };
     return (data.text ?? "").trim();
   } catch {
-    return "";
+    return null;
+  } finally {
+    // Every attempt counts against the daily cap (a timed-out request may still be billed)
+    await bumpUsage("stt_calls", 1).catch(() => {});
   }
 }
 
@@ -105,13 +109,22 @@ export async function scoreCheckup(checkupId: string, userId: string): Promise<S
   if (!row) throw new Error("Check-up not found");
   if (row.status === "ready") return { status: "ready" };
 
-  // Fill in transcripts the phone couldn't make
+  // Fill in transcripts the phone couldn't make (once per clip: a silent clip isn't re-sent on every retry)
   let answers = row.answers;
-  if (answers.some((a) => !a.transcript.trim() && a.clipId)) {
+  if (answers.some(needsServerTranscript)) {
+    let changed = false;
     answers = await Promise.all(
-      answers.map(async (a) => (!a.transcript.trim() && a.clipId ? { ...a, transcript: await transcribeClip(a.clipId, userId) } : a)),
+      answers.map(async (a) => {
+        if (!needsServerTranscript(a)) return a;
+        const transcript = await transcribeClip(a.clipId!, userId);
+        if (transcript === null) return a;
+        changed = true;
+        return { ...a, transcript, sttTried: true };
+      }),
     );
-    await query(`update checkup set answers = $3 where id = $1 and user_id = $2`, [checkupId, userId, JSON.stringify(answers)]);
+    if (changed) {
+      await query(`update checkup set answers = $3 where id = $1 and user_id = $2`, [checkupId, userId, JSON.stringify(answers)]);
+    }
   }
   if (!answers.some((a) => a.transcript.trim())) return { status: "pending", reason: "no-transcript" };
 

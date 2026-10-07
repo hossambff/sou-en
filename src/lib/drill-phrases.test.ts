@@ -34,6 +34,19 @@ describe("curated phrases", () => {
     }
   });
 
+  it("keeps the Darija natural: no MSA forms or known typos", () => {
+    // Fixed in the audit: MSA ("أسعد", "المراهقين", "بفارغ الصبر", "تماما", "ف رأيي", "الأمور"), the
+    // "اللتحتانية" typo, and "Well," rendered as "واخا" (= OK). Moroccan Darija only.
+    const msa = ["أسعد", "المراهقين", "فارغ الصبر", "تماما", "رأيي", "الأمور", "فاجئ", "اللتحتانية"];
+    const texts = [...DRILL_PHRASES.map((p) => ({ id: p.id, ar: p.ar })), ...Object.entries(FOCUS_TIPS).map(([id, tip]) => ({ id, ar: tip.ar }))];
+    for (const { id, ar } of texts) {
+      for (const form of msa) expect(ar.includes(form), `${id}: ${form}`).toBe(false);
+    }
+    expect(DRILL_PHRASES.find((p) => p.id === "m6-explain")!.ar.startsWith("واخا")).toBe(false);
+    // "How much is this?" asks a price (بشحال), not "it's been a while" (شحال هادي)
+    expect(DRILL_PHRASES.find((p) => p.id === "m2-how-much")!.ar).toMatch(/^بشحال/);
+  });
+
   it("scores 100 when each phrase is repeated exactly", () => {
     for (const phrase of DRILL_PHRASES) {
       expect(scoreShadow(phrase.en, phrase.en).score, phrase.id).toBe(100);

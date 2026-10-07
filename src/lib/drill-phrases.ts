@@ -55,7 +55,7 @@ export const FOCUS_TIPS: Record<ShadowItem["focus"], { label: string; en: string
   "v/f": {
     label: "V / F",
     en: "For 'v', touch your top teeth to your bottom lip and let your voice buzz. 'F' is the same with only air.",
-    ar: "ف 'v' حطي السنان الفوقانيين على الشفة اللتحتانية وخلي الصوت يخرج. 'F' بحالها ولكن غير الهوا.",
+    ar: "ف 'v' حطي سنانك الفوقانيين على الشفة التحتانية وخلي الصوت يخرج. 'F' بحالها، غير بالهوا بلا صوت.",
   },
   w: {
     label: "W",
@@ -90,17 +90,17 @@ export const FOCUS_TIPS: Record<ShadowItem["focus"], { label: string; en: string
   "word stress": {
     label: "word stress",
     en: "One part of a long word is louder and longer: to-MOR-row, DOC-tor. Push that part a little.",
-    ar: "كاين جزء ف الكلمة الطويلة كيكون أقوى وأطول: to-MOR-row، DOC-tor. ضغطي عليه شوية.",
+    ar: "كاين شي طرف ف الكلمة الطويلة كيكون أقوى وأطول: to-MOR-row، DOC-tor. ضغطي عليه شوية.",
   },
   "sentence stress": {
     label: "rhythm",
     en: "Say the important words louder and slower. The small words can be quick.",
-    ar: "الكلمات المهمة قوليهم بصوت أعلى وبشوية. الكلمات الصغار دوزيهم بالزربة.",
+    ar: "الكلمات المهمة قوليهم بصوت عالي وبشوية. الكلمات الصغار دوزيهم بالزربة.",
   },
   linking: {
     label: "linking",
     en: "Glue the words together like one long word: 'turn it off' sounds like 'tur-ni-toff'.",
-    ar: "لصقي الكلمات مع بعضياتهم بحال كلمة وحدة: 'turn it off' كتولي 'tur-ni-toff'.",
+    ar: "لصقي الكلمات فبعضياتهم بحال إلا كانت كلمة وحدة: 'turn it off' كتولي 'tur-ni-toff'.",
   },
   intonation: {
     label: "melody",
@@ -110,12 +110,12 @@ export const FOCUS_TIPS: Record<ShadowItem["focus"], { label: string; en: string
   garden: {
     label: "from your garden",
     en: "This one grew in your own Word Garden. Say it like you mean it!",
-    ar: "هادي من الجنان ديالك. قوليها بالثقة!",
+    ar: "هادي من الجنان ديالك. قوليها وانتي واثقة من راسك!",
   },
   fix: {
     label: "your golden fix",
     en: "This is one of your golden fixes. Say it a few times and it will stick.",
-    ar: "هادا واحد من التصحيحات ديالك. عاوديه شحال من مرة وغادي يتشد.",
+    ar: "هادي جملة صلحناها مع بعض. عاوديها شحال من مرة وغادي تبقى ف بالك.",
   },
 };
 
@@ -130,14 +130,14 @@ export const DRILL_PHRASES: DrillPhrase[] = [
   { id: "m1-live", month: 1, en: "I live in Casablanca with my husband.", ar: "كنسكن ف كازا مع راجلي.", focus: "short i" },
   { id: "m1-busy", month: 1, en: "I have a very busy day.", ar: "عندي نهار عامر بزاف.", focus: "v/f" },
   { id: "m1-wait", month: 1, en: "Wait a minute, the baby is crying.", ar: "تسنى دقيقة، البيبي كيبكي.", focus: "w" },
-  { id: "m1-happy", month: 1, en: "I feel happy when my baby smiles.", ar: "كنفرح ملي كيضحك البيبي ديالي.", focus: "h" },
+  { id: "m1-happy", month: 1, en: "I feel happy when my baby smiles.", ar: "كنفرح ملي كيتبسم البيبي ديالي.", focus: "h" },
 
   // Month 2 · Marrakech · "Out and about": past simple, going to, polite requests, pharmacy & transport
-  { id: "m2-pharmacy", month: 2, en: "Excuse me, where is the pharmacy?", ar: "سمح ليا، فين كاينة الفرمسيان؟", focus: "word stress" },
+  { id: "m2-pharmacy", month: 2, en: "Excuse me, where is the pharmacy?", ar: "سمح ليا، فين كاينة الفارماسي؟", focus: "word stress" },
   { id: "m2-fever", month: 2, en: "I'd like some medicine for a fever.", ar: "بغيت شي دوا ديال السخانة.", focus: "v/f" },
   { id: "m2-cough", month: 2, en: "My baby had a cough last night.", ar: "البيبي ديالي كانت فيه الكحبة البارح ف الليل.", focus: "h" },
   { id: "m2-park", month: 2, en: "We walked to the park yesterday.", ar: "مشينا للجردة على رجلينا البارح.", focus: "-ed endings" },
-  { id: "m2-how-much", month: 2, en: "How much is this, please?", ar: "شحال هادي عافاك؟", focus: "short i" },
+  { id: "m2-how-much", month: 2, en: "How much is this, please?", ar: "بشحال هادي عافاك؟", focus: "short i" },
   { id: "m2-doctor", month: 2, en: "I'm going to call the doctor tomorrow.", ar: "غادي نعيط للطبيب غدا.", focus: "word stress" },
   { id: "m2-slowly", month: 2, en: "Could you speak more slowly, please?", ar: "واش ممكن تهضر بشوية عافاك؟", focus: "linking" },
   { id: "m2-wipes", month: 2, en: "I'm looking for baby wipes.", ar: "كنقلب على اللانجيت ديال البيبي.", focus: "-ing" },
@@ -147,29 +147,29 @@ export const DRILL_PHRASES: DrillPhrase[] = [
   // Month 3 · Tangier · "Telling stories": past continuous, linking words, sentence stress
   { id: "m3-feeding", month: 3, en: "I was feeding the baby when you called.", ar: "كنت كنوكل البيبي ملي عيطتي.", focus: "sentence stress" },
   { id: "m3-first", month: 3, en: "First we had breakfast, then we went out.", ar: "اللول فطرنا، ومن بعد خرجنا.", focus: "linking" },
-  { id: "m3-happiest", month: 3, en: "It was the happiest day of my life.", ar: "كان أسعد نهار ف حياتي.", focus: "h" },
-  { id: "m3-laughing", month: 3, en: "Suddenly, the baby started laughing.", ar: "فجأة، البيبي بدا كيضحك.", focus: "-ed endings" },
-  { id: "m3-nervous", month: 3, en: "I was so nervous, but everything was fine.", ar: "كنت خايفة بزاف، ولكن كولشي داز مزيان.", focus: "v/f" },
-  { id: "m3-visited", month: 3, en: "We visited my family in Marrakech.", ar: "زرنا العائلة ديالي ف مراكش.", focus: "v/f" },
+  { id: "m3-happiest", month: 3, en: "It was the happiest day of my life.", ar: "كان أحسن نهار ف حياتي.", focus: "h" },
+  { id: "m3-laughing", month: 3, en: "Suddenly, the baby started laughing.", ar: "على غفلة، البيبي بدا كيضحك.", focus: "-ed endings" },
+  { id: "m3-nervous", month: 3, en: "I was so nervous, but everything was fine.", ar: "كنت خايفة بزاف، ولكن كلشي داز مزيان.", focus: "v/f" },
+  { id: "m3-visited", month: 3, en: "We visited my family in Marrakech.", ar: "مشينا نزورو الفاميلة ديالي ف مراكش.", focus: "v/f" },
   { id: "m3-woke", month: 3, en: "While I was cooking, the baby woke up.", ar: "ملي كنت كنطيب، البيبي فاق.", focus: "w" },
-  { id: "m3-raining", month: 3, en: "It was raining, so we stayed at home.", ar: "كانت الشتا، داكشي علاش بقينا ف الدار.", focus: "r" },
+  { id: "m3-raining", month: 3, en: "It was raining, so we stayed at home.", ar: "كانت الشتا كتصب، داكشي علاش بقينا ف الدار.", focus: "r" },
   { id: "m3-mother", month: 3, en: "My mother came to help me for a week.", ar: "ماما جات تعاوني واحد السيمانة.", focus: "schwa" },
   { id: "m3-forget", month: 3, en: "I'll never forget that moment.", ar: "عمري ما غادي ننسى ديك اللحظة.", focus: "word stress" },
 
   // Month 4 · Dublin · "What I think": present perfect, comparatives, opinions
   { id: "m4-mom", month: 4, en: "I've been a mom for four months now.", ar: "هادي ربعة شهور وأنا ماما.", focus: "v/f" },
-  { id: "m4-opinion", month: 4, en: "In my opinion, sleep is more important than money.", ar: "ف رأيي، النعاس أهم من الفلوس.", focus: "word stress" },
+  { id: "m4-opinion", month: 4, en: "In my opinion, sleep is more important than money.", ar: "ف نظري، النعاس أهم من الفلوس.", focus: "word stress" },
   { id: "m4-agree", month: 4, en: "I totally agree with you.", ar: "متافقة معاك مية ف المية.", focus: "sentence stress" },
-  { id: "m4-depends", month: 4, en: "I see your point, but I think it depends.", ar: "فهمتك، ولكن كنظن على حساب.", focus: "th" },
-  { id: "m4-tried", month: 4, en: "I've never tried that before.", ar: "عمري ما جربت هادي من قبل.", focus: "-ed endings" },
+  { id: "m4-depends", month: 4, en: "I see your point, but I think it depends.", ar: "فهمت قصدك، ولكن كنظن على حساب الظروف.", focus: "th" },
+  { id: "m4-tried", month: 4, en: "I've never tried that before.", ar: "عمري ما جربت هادشي من قبل.", focus: "-ed endings" },
   { id: "m4-cheaper", month: 4, en: "This one is cheaper and better.", ar: "هادي أرخص وحسن.", focus: "p/b" },
-  { id: "m4-teenagers", month: 4, en: "Babies are much easier than teenagers!", ar: "الصغار أسهل بزاف من المراهقين!", focus: "sentence stress" },
+  { id: "m4-teenagers", month: 4, en: "Babies are much easier than teenagers!", ar: "الصغار ساهلين بزاف على الدراري الكبار!", focus: "sentence stress" },
   { id: "m4-rather", month: 4, en: "I'd rather stay home tonight.", ar: "كنفضل نبقى ف الدار هاد الليلة.", focus: "r" },
   { id: "m4-london", month: 4, en: "Have you ever been to London?", ar: "واش عمرك مشيتي للندن؟", focus: "intonation" },
   { id: "m4-honest", month: 4, en: "I don't think so, to be honest.", ar: "ما كنظنش، بصراحة.", focus: "th" },
 
   // Month 5 · London · "Handling it": phone calls, modals, conditionals, small talk
-  { id: "m5-appointment", month: 5, en: "Hi, I'm calling about my appointment.", ar: "السلام، كنعيط على قبل الموعد ديالي.", focus: "linking" },
+  { id: "m5-appointment", month: 5, en: "Hi, I'm calling about my appointment.", ar: "السلام، كنعيط على الموعد ديالي.", focus: "linking" },
   { id: "m5-manager", month: 5, en: "Could I speak to the manager, please?", ar: "واش نقدر نهضر مع المسؤول عافاك؟", focus: "p/b" },
   { id: "m5-call-back", month: 5, en: "If I have time, I'll call you back.", ar: "إلا كان عندي الوقت، غادي نعاود نعيط ليك.", focus: "v/f" },
   { id: "m5-bill", month: 5, en: "I'm afraid there's a problem with my bill.", ar: "سمح ليا، كاين شي مشكل ف الفاكتورة ديالي.", focus: "p/b" },
@@ -182,15 +182,15 @@ export const DRILL_PHRASES: DrillPhrase[] = [
 
   // Month 6 · New York · "Being myself in English": rhythm, idioms, connected speech
   { id: "m6-proud", month: 6, en: "To be honest, I'm really proud of myself.", ar: "بصراحة، أنا فخورة براسي بزاف.", focus: "sentence stress" },
-  { id: "m6-explain", month: 6, en: "Well, it's kind of hard to explain.", ar: "واخا، صعيب شوية نشرحها.", focus: "schwa" },
-  { id: "m6-weekend", month: 6, en: "I'm looking forward to the weekend.", ar: "كنتسنى الويكاند بفارغ الصبر.", focus: "w" },
+  { id: "m6-explain", month: 6, en: "Well, it's kind of hard to explain.", ar: "إيوا، صعيب شوية نشرحها.", focus: "schwa" },
+  { id: "m6-weekend", month: 6, en: "I'm looking forward to the weekend.", ar: "ما بقيتش صابرة حتى يجي الويكاند.", focus: "w" },
   { id: "m6-growing", month: 6, en: "My baby is growing up so fast!", ar: "البيبي ديالي كيكبر بالزربة!", focus: "-ing" },
-  { id: "m6-agree-more", month: 6, en: "I couldn't agree more.", ar: "متافقة معاك تماما.", focus: "sentence stress" },
-  { id: "m6-by-ear", month: 6, en: "Let's play it by ear.", ar: "نشوفو كيفاش تجي الأمور.", focus: "linking" },
+  { id: "m6-agree-more", month: 6, en: "I couldn't agree more.", ar: "عندك الصح، مية ف المية!", focus: "sentence stress" },
+  { id: "m6-by-ear", month: 6, en: "Let's play it by ear.", ar: "نخليوها حتى نشوفو كيفاش تجي.", focus: "linking" },
   { id: "m6-moon", month: 6, en: "I'm over the moon about it.", ar: "فرحانة بزاف، طايرة بالفرحة.", focus: "v/f" },
   { id: "m6-hang-on", month: 6, en: "Hang on, let me think about it.", ar: "تسنى شوية، خليني نفكر فيها.", focus: "th" },
   { id: "m6-cake", month: 6, en: "It was a piece of cake!", ar: "كانت ساهلة بزاف!", focus: "p/b" },
-  { id: "m6-long-way", month: 6, en: "Honestly, I've come a long way.", ar: "بصراحة، وصلت لبعيد.", focus: "w" },
+  { id: "m6-long-way", month: 6, en: "Honestly, I've come a long way.", ar: "بصراحة، تقدمت بزاف.", focus: "w" },
 ];
 
 export type PersonalPhrase = { en: string; ar: string; source: "garden" | "fix" };

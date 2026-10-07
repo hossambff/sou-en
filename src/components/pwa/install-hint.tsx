@@ -39,17 +39,43 @@ function dismiss() {
   dismissListeners.forEach((listener) => listener());
 }
 
+type Audience = "learner" | "partner";
+
 type Props = {
   /** "home": a dismissible nudge that disappears once installed. "settings": always shows the current state. */
   placement?: "home" | "settings";
+  /** Who reads it: Sou (Darija addressed to a woman) or a cheerleader such as her husband (addressed to a man). */
+  audience?: Audience;
   className?: string;
+};
+
+/** Darija imperatives agree with who's reading: "حطي" for Sou, "حط" for her husband. */
+const COPY: Record<
+  Audience,
+  { title: string; install: string; why: string; steps: [string, string, string]; iosNote: string }
+> = {
+  learner: {
+    title: "حطي التطبيق فالشاشة ديال التيليفون",
+    install: "ثبتي",
+    why: "One tap — it opens like a real app, full screen, and can remind you to practice.",
+    steps: ["كليكي على زر المشاركة", "ختاري Add to Home Screen", "ومن بعد حليه من الشاشة"],
+    iosNote: "🔔 On iPhone, reminders only work from the home-screen app.",
+  },
+  partner: {
+    title: "حط التطبيق فالشاشة ديال التيليفون",
+    install: "ثبت",
+    why: "One tap — it opens like a real app, full screen, and can tell you when Sou practices.",
+    steps: ["ضغط على زر المشاركة", "ختار Add to Home Screen", "ومن بعد حلو من الشاشة"],
+    iosNote: "🔔 On iPhone, notifications only work from the home-screen app.",
+  },
 };
 
 /**
  * "Add to Home Screen" helper. iPhone: a 3-step guide (Share → Add to Home Screen → Add).
  * Android/Chrome: a one-tap Install button (beforeinstallprompt). Hidden once installed.
  */
-export function InstallHint({ placement = "home", className = "" }: Props) {
+export function InstallHint({ placement = "home", audience = "learner", className = "" }: Props) {
+  const copy = COPY[audience];
   const hydrated = useSyncExternalStore(noop, () => true, () => false);
   const standalone = useSyncExternalStore(subscribeStandalone, isStandalone, () => false);
   const platform = useSyncExternalStore(noop, currentPlatform, () => "desktop" as const);
@@ -96,7 +122,7 @@ export function InstallHint({ placement = "home", className = "" }: Props) {
       <div className="min-w-0 flex-1">
         <p className="font-medium leading-snug">Put Sou Coach on your home screen</p>
         <p className="ar text-sm text-ink-soft" dir="rtl">
-          حطي التطبيق فالشاشة ديال التيليفون
+          {copy.title}
         </p>
       </div>
       {close}
@@ -107,7 +133,7 @@ export function InstallHint({ placement = "home", className = "" }: Props) {
     return (
       <Shell className={className}>
         {header}
-        <p className="mt-2 text-sm text-ink-soft">One tap — it opens like a real app, full screen, and can remind you to practice.</p>
+        <p className="mt-2 text-sm text-ink-soft">{copy.why}</p>
         <button
           disabled={busy}
           onClick={async () => {
@@ -116,9 +142,9 @@ export function InstallHint({ placement = "home", className = "" }: Props) {
             setBusy(false);
             if (outcome === "dismissed" && home) dismiss();
           }}
-          className="mt-3 w-full rounded-2xl bg-terra py-3.5 font-medium text-white shadow-card transition active:scale-[0.98] disabled:opacity-60"
+          className="mt-3 w-full rounded-2xl bg-terra py-3.5 font-medium text-on-accent shadow-card transition active:scale-[0.98] disabled:opacity-60"
         >
-          Install the app <bdi className="ar opacity-80">· ثبتي</bdi>
+          Install the app <bdi className="ar opacity-80">· {copy.install}</bdi>
         </button>
       </Shell>
     );
@@ -139,19 +165,17 @@ export function InstallHint({ placement = "home", className = "" }: Props) {
       <Shell className={className}>
         {header}
         <ol className="mt-3 space-y-2">
-          <Step n={1} icon={<ShareIcon />} ar="كليكي على زر المشاركة">
+          <Step n={1} icon={<ShareIcon />} ar={copy.steps[0]}>
             Tap <b>Share</b> in Safari
           </Step>
-          <Step n={2} icon={<AddIcon />} ar="ختاري Add to Home Screen">
+          <Step n={2} icon={<AddIcon />} ar={copy.steps[1]}>
             Scroll down, choose <b>Add to Home Screen</b>
           </Step>
-          <Step n={3} icon={<span className="text-base">🏠</span>} ar="ومن بعد حليه من الشاشة">
+          <Step n={3} icon={<span className="text-base">🏠</span>} ar={copy.steps[2]}>
             Tap <b>Add</b>, then open it from your home screen
           </Step>
         </ol>
-        <p className="mt-3 rounded-xl bg-saffron-soft px-3 py-2 text-xs text-ink">
-          🔔 On iPhone, reminders only work from the home-screen app.
-        </p>
+        <p className="mt-3 rounded-xl bg-saffron-soft px-3 py-2 text-xs text-ink">{copy.iosNote}</p>
       </Shell>
     );
   }
@@ -181,7 +205,7 @@ function Shell({ children, className }: { children: React.ReactNode; className: 
 function Step({ n, icon, ar, children }: { n: number; icon: React.ReactNode; ar: string; children: React.ReactNode }) {
   return (
     <li className="flex items-center gap-3 rounded-2xl bg-bg-deep/60 px-3 py-2.5 text-sm">
-      <span className="grid size-6 shrink-0 place-items-center rounded-full bg-terra text-xs font-semibold text-white">{n}</span>
+      <span className="grid size-6 shrink-0 place-items-center rounded-full bg-terra text-xs font-semibold text-on-accent">{n}</span>
       <span className="min-w-0 flex-1 leading-snug">
         <span className="block">{children}</span>
         <span className="ar block text-xs text-ink-soft" dir="rtl">

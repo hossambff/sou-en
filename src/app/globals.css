@@ -8,13 +8,16 @@
   --ink: #2b1d14;
   --ink-soft: #6b5545;
   --line: #e9dac5;
-  --terra: #c8553d;
-  --terra-deep: #a4402c;
+  --terra: #b84a33; /* white text 5.2:1, as text on cream 4.8:1 */
+  --terra-deep: #963a28;
   --terra-soft: #f6dcd2;
-  --mint: #2f8f6b;
+  --mint: #26795a; /* white text 5.3:1 */
   --mint-soft: #d7eee3;
   --saffron: #e9a23b;
   --saffron-soft: #fbe9c8;
+  /* Text on filled accent buttons: on saffron (7.5:1), and on mint / terra */
+  --on-saffron: #2b1d14;
+  --on-accent: #ffffff;
   --shadow: 0 1px 2px rgb(43 29 20 / 0.06), 0 8px 24px -12px rgb(43 29 20 / 0.18);
   --pattern-opacity: 0.07;
   color-scheme: light;
@@ -35,6 +38,9 @@
   --mint-soft: #1c3329;
   --saffron: #f0b55a;
   --saffron-soft: #3b2c15;
+  /* The night accents are light, so text on them is dark: 8.9:1 on saffron, 8.5:1 on mint, 6.4:1 on terra */
+  --on-saffron: #2b1d14;
+  --on-accent: #15100d;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.6);
   --pattern-opacity: 0.04;
   color-scheme: dark;
@@ -55,6 +61,8 @@
     --mint-soft: #1c3329;
     --saffron: #f0b55a;
     --saffron-soft: #3b2c15;
+    --on-saffron: #2b1d14;
+    --on-accent: #15100d;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.6);
     --pattern-opacity: 0.04;
     color-scheme: dark;
@@ -75,6 +83,8 @@
   --color-mint-soft: var(--mint-soft);
   --color-saffron: var(--saffron);
   --color-saffron-soft: var(--saffron-soft);
+  --color-on-saffron: var(--on-saffron);
+  --color-on-accent: var(--on-accent);
   --font-sans: var(--font-readex), system-ui, sans-serif;
   --font-display: var(--font-fraunces), var(--font-readex), Georgia, serif;
   --shadow-card: var(--shadow);

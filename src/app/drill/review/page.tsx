@@ -3,6 +3,7 @@ import { queryOne } from "@/lib/db";
 import { learnerUsesServerVoice } from "@/lib/tts";
 import { reviewRound, type ReviewSet } from "../drill-data";
 import type { DrillMode } from "../drill-ui";
+import { learnerSpeechRate } from "../voice-prefs";
 import { ReviewClient } from "./review-client";
 
 export default async function ReviewPage({ searchParams }: PageProps<"/drill/review">) {
@@ -23,6 +24,7 @@ export default async function ReviewPage({ searchParams }: PageProps<"/drill/rev
       mode={mode}
       serverVoice={await learnerUsesServerVoice(user.id)}
       serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
+      speechRate={await learnerSpeechRate(user.id)}
     />
   );
 }

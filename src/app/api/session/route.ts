@@ -3,6 +3,7 @@ import { getLearnerUserId } from "@/lib/session";
 import { queryOne } from "@/lib/db";
 import { ACTIVITIES, getScenario } from "@/lib/scenarios";
 import { SESSION_MODES } from "@/lib/coach-prompt";
+import { closeStaleSessions } from "@/lib/session-maintenance";
 
 const body = z
   .object({
@@ -25,6 +26,8 @@ export async function POST(request: Request) {
 
   const { mode, minutes, activity } = parsed.data;
   const scenario = activity === "roleplay" ? parsed.data.scenario! : null;
+  // Sessions she never finished (app closed, baby time) get their points now; never block the new one
+  await closeStaleSessions(userId).catch((error) => console.error("Closing stale sessions failed", error));
   const row = await queryOne<{ id: string }>(
     `insert into coach_session (user_id, mode, minutes_planned, activity, scenario)
      values ($1, $2, $3, $4, $5) returning id`,

@@ -4,7 +4,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Speaker } from "@/lib/voice/speaker";
+import { useScreenWake } from "@/lib/screen-wake";
 import { CHECKUP_MAX_SECONDS, CHECKUP_PROMPTS, type CheckupPromptId } from "@/lib/progress";
+import { newRunId } from "@/app/drill/drill-ui";
 import { ClipPlayer } from "./clip-player";
 
 type Phase = "intro" | "asking" | "ready" | "recording" | "review" | "sending" | "error";
@@ -80,6 +82,8 @@ export function CheckupClient(props: {
   lastCefr: string | null;
   serverVoice: boolean;
   serverStt: boolean;
+  /** Her Settings speed, so the phone-voice fallback asks the questions at it too */
+  speechRate: number;
 }) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("intro");
@@ -100,9 +104,15 @@ export function CheckupClient(props: {
   const timer = useRef<number>(0);
   const meter = useRef<number>(0);
   const askToken = useRef(0);
+  const starting = useRef(false);
+  /** One id per check-up: "Try again" after a timeout re-sends it, so the server never saves it twice */
+  const checkupId = useRef<string | null>(null);
 
   const prompt = CHECKUP_PROMPTS[index];
   const isLast = index === CHECKUP_PROMPTS.length - 1;
+
+  // Hands-free (baby in arms): keep the screen on while Hossam asks, she answers, and he listens
+  useScreenWake(phase === "asking" || phase === "ready" || phase === "recording" || phase === "sending");
 
   useEffect(
     () => () => {
@@ -134,13 +144,21 @@ export function CheckupClient(props: {
   }
 
   async function begin(startAt = index) {
+    // A double tap on "I'm ready" must not open two mic streams (the first would never be stopped)
+    if (starting.current) return;
+    starting.current = true;
     setError(null);
     speaker.current ??= new Speaker(props.serverVoice, true);
+    speaker.current.rate = props.speechRate;
     speaker.current.unlock();
     try {
-      stream.current ??= await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      if (!stream.current) {
+        const fresh = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        if (stream.current) fresh.getTracks().forEach((track) => track.stop());
+        else stream.current = fresh;
+      }
       if (!context.current) {
         context.current = new AudioContext();
         const source = context.current.createMediaStreamSource(stream.current);
@@ -153,6 +171,8 @@ export function CheckupClient(props: {
       setError("Hossam can't hear you yet. Please allow the microphone for this app, then try again.");
       setPhase("error");
       return;
+    } finally {
+      starting.current = false;
     }
     void ask(startAt);
   }
@@ -297,10 +317,11 @@ export function CheckupClient(props: {
       return;
     }
     try {
+      checkupId.current ??= newRunId();
       const response = await fetch("/api/checkup", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ answers }),
+        body: JSON.stringify({ id: checkupId.current, answers }),
       });
       if (!response.ok) throw new Error(await response.text());
       const { id } = (await response.json()) as { id: string };
@@ -348,7 +369,7 @@ export function CheckupClient(props: {
             </p>
           )}
         </div>
-        <button onClick={() => begin()} className="mt-6 w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card active:scale-[0.98]">
+        <button onClick={() => begin()} className="mt-6 w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]">
           I&apos;m ready{" "}
           <span className="ar" dir="rtl">
             · يالاه
@@ -395,7 +416,7 @@ export function CheckupClient(props: {
             if (!stream.current) return void begin(0);
             void ask(0);
           }}
-          className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card active:scale-[0.98]"
+          className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]"
         >
           Try again
         </button>
@@ -483,10 +504,10 @@ export function CheckupClient(props: {
               </label>
             )}
             <div className="grid grid-cols-2 gap-2">
-              <button onClick={redo} className="min-h-12 rounded-2xl border border-line bg-card py-3 font-medium active:scale-[0.98]">
+              <button onClick={redo} className="min-h-12 rounded-2xl border border-line bg-card py-3 font-medium motion-safe:active:scale-[0.98]">
                 🔁 Again
               </button>
-              <button onClick={() => next()} className="min-h-12 rounded-2xl bg-terra py-3 font-medium text-white shadow-card active:scale-[0.98]">
+              <button onClick={() => next()} className="min-h-12 rounded-2xl bg-terra py-3 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]">
                 {isLast ? "Finish ✓" : "Keep it ›"}
               </button>
             </div>
@@ -495,7 +516,7 @@ export function CheckupClient(props: {
           <>
             <button
               onClick={startRecording}
-              className="relative grid size-36 place-items-center rounded-full transition active:scale-95"
+              className="relative grid size-36 place-items-center rounded-full transition motion-safe:active:scale-95"
               aria-label="Start recording your answer"
             >
               <span className="absolute inset-0 rounded-full bg-terra/20 animate-ripple" aria-hidden />

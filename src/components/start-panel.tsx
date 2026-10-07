@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import type { SessionMode } from "@/lib/coach-prompt";
 import { buildPlan, planMinutes, type PlanInput } from "@/lib/plan";
 import { sessionHref } from "@/lib/scenarios";
+import { isNightHour } from "@/lib/time-of-day";
 
 const MINUTES = [3, 5, 10, 20];
 const MODES: { value: SessionMode; label: string; icon: string; hint: string }[] = [
@@ -13,10 +14,9 @@ const MODES: { value: SessionMode; label: string; icon: string; hint: string }[]
   { value: "night", label: "Night", icon: "🌙", hint: "Night feed, low effort" },
 ];
 
-function defaultMode(): SessionMode {
-  const hour = new Date().getHours();
-  return hour >= 23 || hour < 6 ? "night" : "normal";
-}
+const noop = () => () => {};
+const deviceHour = () => new Date().getHours();
+const noHour = () => null;
 
 /**
  * The big "Talk to Hossam" button with "I have… minutes" and mode pickers.
@@ -28,12 +28,14 @@ export function StartPanel({ defaultMinutes = 5, plan }: { defaultMinutes?: numb
     [defaultMinutes],
   );
   const [minutes, setMinutes] = useState(defaultMinutes);
-  const [mode, setMode] = useState<SessionMode>("normal");
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- time-of-day default needs the device clock, after hydration
-    setMode(defaultMode());
-  }, []);
+  // null until she taps a mode; until then the time of day decides
+  const [picked, setPicked] = useState<SessionMode | null>(null);
+  // With a plan, use its hour (her timezone, from the server) so the big button and Today's plan always agree.
+  // Without one, the device clock (read after hydration).
+  const clientHour = useSyncExternalStore(noop, deviceHour, noHour);
+  const hour = plan ? plan.hour : clientHour;
+  const automatic: SessionMode = hour !== null && isNightHour(hour) ? "night" : "normal";
+  const mode = picked ?? automatic;
 
   return (
     <>
@@ -84,7 +86,7 @@ export function StartPanel({ defaultMinutes = 5, plan }: { defaultMinutes?: numb
               key={option.value}
               role="radio"
               aria-checked={mode === option.value}
-              onClick={() => setMode(option.value)}
+              onClick={() => setPicked(option.value)}
               className={`flex flex-col items-center rounded-2xl border px-2 py-2.5 transition active:scale-95 ${
                 mode === option.value ? "border-terra bg-terra-soft" : "border-line bg-card"
               }`}
@@ -97,8 +99,8 @@ export function StartPanel({ defaultMinutes = 5, plan }: { defaultMinutes?: numb
         </div>
       </section>
 
-      {/* Whisper/Night picked by hand also applies to the plan's links */}
-      {plan && <TodayPlan input={{ ...plan, minutes, mode: mode === "normal" ? plan.mode : mode }} />}
+      {/* The plan's links follow the mode shown above: her pick (even an explicit Normal at night), else the time of day */}
+      {plan && <TodayPlan input={{ ...plan, minutes, mode }} />}
     </>
   );
 }

@@ -23,10 +23,23 @@ export const getMember = cache(async (userId: string) =>
   queryOne<Member>(`select user_id, role, first_name from app_member where user_id = $1`, [userId]),
 );
 
-/** The family's learner (Sou). There is one learner per deployment. */
+/** The family's learner (Sou). One per deployment: LEARNER_EMAIL wins, else the first learner. */
 export const getLearnerMember = cache(async () =>
-  queryOne<Member>(`select user_id, role, first_name from app_member where role = 'learner' order by created_at limit 1`),
+  queryOne<Member>(
+    `select m.user_id, m.role, m.first_name
+       from app_member m join "user" u on u.id = m.user_id
+      where m.role = 'learner'
+      order by (lower(u.email) = lower($1)) desc, m.created_at, m.user_id
+      limit 1`,
+    [process.env.LEARNER_EMAIL ?? ""],
+  ),
 );
+
+/** Who may take the learner role: LEARNER_EMAIL when set, otherwise anyone. */
+export function mayBeLearner(email: string) {
+  const learnerEmail = (process.env.LEARNER_EMAIL ?? "").trim().toLowerCase();
+  return !learnerEmail || email.trim().toLowerCase() === learnerEmail;
+}
 
 /** Pages for Sou. Cheerleaders go to /family; new users go to onboarding. */
 export async function requireLearner() {

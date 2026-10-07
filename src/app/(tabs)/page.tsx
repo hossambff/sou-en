@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireLearner } from "@/lib/session";
-import { getDashboard, getPlanContext, getProfile, localHour, localToday } from "@/lib/learner";
+import { getDashboard, getPlanContext, getProfile, localHour, localToday, profileTimeZone } from "@/lib/learner";
 import { CITIES, babyAgeLabel, levelFor, monthOfJourney } from "@/lib/progress";
-import { dayNumber, greetingFor } from "@/lib/plan";
+import { dayNumber, greetingFor, greetingLine } from "@/lib/plan";
 import { scenariosForLearner } from "@/lib/scenarios";
 import { StartPanel } from "@/components/start-panel";
 import { WeekRing } from "@/components/week-ring";
@@ -22,17 +22,19 @@ export default async function HomePage() {
   const profile = await getProfile(user.id);
   if (!profile) redirect("/onboarding");
 
+  // One clock for the greeting, the big button's default mode and Today's plan: her own timezone
+  const timeZone = profileTimeZone(profile);
   const [dash, planContext] = await Promise.all([
-    getDashboard(user.id, profile.started_on),
-    getPlanContext(user.id, profile.started_on),
+    getDashboard(user.id, profile.started_on, timeZone),
+    getPlanContext(user.id, profile.started_on, timeZone),
   ]);
   const month = monthOfJourney(profile.started_on);
   const level = levelFor(dash.points);
   const babyAge = babyAgeLabel(profile.baby_birthdate);
-  const hour = localHour();
+  const hour = localHour(timeZone);
   const greeting = greetingFor(hour);
   const scenarios = scenariosForLearner(profile.cefr_level, month)
-    .filter((item) => item.unlocked)
+    .filter((item) => item.atLevel)
     .map(({ scenario }) => ({ id: scenario.id, title: scenario.title, titleAr: scenario.titleAr, emoji: scenario.emoji }));
 
   return (
@@ -42,9 +44,7 @@ export default async function HomePage() {
           <p className="ar text-lg text-terra" dir="rtl">
             {greeting.ar} {greetingEmoji(hour)}
           </p>
-          <h1 className="font-display text-3xl font-semibold tracking-tight">
-            {greeting.en}, {profile.first_name}
-          </h1>
+          <h1 className="font-display text-3xl font-semibold tracking-tight">{greetingLine(hour, profile.first_name)}</h1>
           <p className="text-sm text-ink-soft">
             {babyAge && profile.baby_name ? `${profile.baby_name} is ${babyAge} old · ` : ""}
             {dash.practicedToday ? "You showed up today ✨" : "Even 3 minutes counts."}
@@ -64,8 +64,9 @@ export default async function HomePage() {
             firstCheckup: planContext.firstCheckup,
             babyName: profile.baby_name,
             doneToday: planContext.doneToday,
-            totalSessions: dash.sessions,
-            dayIndex: dayNumber(localToday()),
+            // Conversations only: a drill or the day-1 check-up isn't her "first chat with Hossam"
+            totalSessions: dash.chats,
+            dayIndex: dayNumber(localToday(timeZone)),
             scenarios,
           }}
         />
@@ -155,7 +156,11 @@ export default async function HomePage() {
               const state = i + 1 < month ? "done" : i + 1 === month ? "here" : "ahead";
               return (
                 <li key={city.name} title={city.name} className="flex flex-1 flex-col items-center gap-1">
+                  <span className="sr-only">
+                    Month {i + 1}, {city.name}: {state === "done" ? "visited" : state === "here" ? "you are here" : "not yet"}
+                  </span>
                   <span
+                    aria-hidden
                     className={`grid size-10 place-items-center rounded-full text-lg transition ${
                       state === "here"
                         ? "bg-terra-soft ring-2 ring-terra"
@@ -166,7 +171,10 @@ export default async function HomePage() {
                   >
                     {city.emoji}
                   </span>
-                  <span className={`h-3 text-[10px] leading-3 ${state === "here" ? "font-semibold text-terra" : "text-ink-soft"}`}>
+                  <span
+                    aria-hidden
+                    className={`h-3 text-[10px] leading-3 ${state === "here" ? "font-semibold text-terra" : "text-ink-soft"}`}
+                  >
                     {state === "here" || i === CITIES.length - 1 ? city.name : ""}
                   </span>
                 </li>

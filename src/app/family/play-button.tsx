@@ -36,7 +36,7 @@ export function PlayButton({ src, label }: { src: string; label: string }) {
       onClick={toggle}
       aria-label={playing ? `Stop ${label}` : `Play ${label}`}
       className={`grid size-11 shrink-0 place-items-center rounded-full text-sm transition active:scale-95 ${
-        playing ? "bg-terra text-white" : "bg-bg-deep text-terra"
+        playing ? "bg-terra text-on-accent" : "bg-bg-deep text-terra"
       }`}
     >
       {playing ? "■" : "▶︎"}

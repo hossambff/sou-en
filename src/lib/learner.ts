@@ -1,10 +1,36 @@
 import "server-only";
 import { query, queryOne } from "./db";
 import { WEEKLY_GOAL_DAYS, journeyMonthNumber, monthOfJourney } from "./progress";
+import { safeTimeZone } from "./reminders";
+import { ACTIVITIES } from "./scenarios";
+import { hourIn } from "./time-of-day";
 import type { BiteKind } from "./plan";
 import type { MomFacts } from "./milestones";
 
-export const APP_TIMEZONE = process.env.APP_TIMEZONE ?? "Africa/Casablanca";
+/** Deployment-wide fallback. Prefer learnerTimeZone()/profileTimeZone(): her own zone, saved from her phone. */
+export const APP_TIMEZONE = safeTimeZone(process.env.APP_TIMEZONE, "Africa/Casablanca");
+
+/** Conversations with Hossam (not drills, not check-ups): what "first chat" and the plan's chat count mean. */
+export const CONVERSATION_ACTIVITIES: readonly string[] = ACTIVITIES;
+
+// ── One timezone for "today" ────────────────────────────────────────────────
+// Home, Today's plan, Progress, the Cheer Squad and the push reminders all use the learner's
+// profile timezone (learner_profile.timezone, set from her phone), falling back to APP_TIMEZONE.
+
+/** Her saved timezone if it's a real IANA zone, else APP_TIMEZONE. */
+export function resolveTimeZone(saved: string | null | undefined) {
+  return safeTimeZone(saved, APP_TIMEZONE);
+}
+
+export function profileTimeZone(profile: { timezone?: string | null } | null | undefined) {
+  return resolveTimeZone(profile?.timezone);
+}
+
+/** The learner's timezone, looked up by user id (APP_TIMEZONE if she has no profile yet). */
+export async function learnerTimeZone(userId: string) {
+  const row = await queryOne<{ timezone: string | null }>(`select timezone from learner_profile where user_id = $1`, [userId]);
+  return resolveTimeZone(row?.timezone);
+}
 
 export type LearnerProfile = {
   user_id: string;
@@ -17,32 +43,37 @@ export type LearnerProfile = {
   cefr_level: string;
   /** Always loaded by getProfile; optional so hand-written fixtures stay valid. */
   default_minutes?: number;
+  /** Her phone's IANA timezone (always loaded by getProfile). Use profileTimeZone(profile) to read it safely. */
+  timezone?: string;
 };
 
 export function getProfile(userId: string) {
   return queryOne<LearnerProfile>(
     `select user_id, first_name, baby_name, baby_birthdate::text, why_english, darija_script,
-            started_on::text, cefr_level, default_minutes
+            started_on::text, cefr_level, default_minutes, timezone
        from learner_profile where user_id = $1`,
     [userId],
   );
 }
 
-export async function getDashboard(userId: string, startedOn: string) {
+/** Pass `timeZone` (profileTimeZone(profile)) when you have it; otherwise it's looked up. */
+export async function getDashboard(userId: string, startedOn: string, timeZone?: string) {
+  const zone = timeZone ?? (await learnerTimeZone(userId));
   const [totals, week, words] = await Promise.all([
-    queryOne<{ points: number; sessions: number; speaking_seconds: number }>(
+    queryOne<{ points: number; sessions: number; chats: number; speaking_seconds: number }>(
       `select coalesce(sum(points), 0)::int as points,
               count(*) filter (where ended_at is not null)::int as sessions,
+              count(*) filter (where ended_at is not null and activity = any($2::text[]))::int as chats,
               coalesce(sum(speaking_seconds), 0)::int as speaking_seconds
          from coach_session where user_id = $1`,
-      [userId],
+      [userId, CONVERSATION_ACTIVITIES],
     ),
     query<{ day: string }>(
       `select distinct (started_at at time zone $2)::date::text as day
          from coach_session
         where user_id = $1 and speaking_seconds > 0
           and started_at at time zone $2 >= date_trunc('week', now() at time zone $2)`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ),
     queryOne<{ total: number; due: number }>(
       `select count(*)::int as total, count(*) filter (where due <= now())::int as due
@@ -52,10 +83,10 @@ export async function getDashboard(userId: string, startedOn: string) {
   ]);
 
   const daysThisWeek = week.length;
-  const today = new Intl.DateTimeFormat("en-CA", { timeZone: APP_TIMEZONE }).format(new Date());
+  const today = localToday(zone);
   // Days of this week before today that she could have practiced (not counting days before she joined)
   const dayMs = 86_400_000;
-  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: APP_TIMEZONE, weekday: "short" }).format(new Date());
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short" }).format(new Date());
   const weekStart = new Date(Date.parse(today) - ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(weekday) * dayMs);
   const countFrom = Math.max(weekStart.getTime(), Date.parse(startedOn));
   const daysBeforeToday = Math.max(0, Math.round((Date.parse(today) - countFrom) / dayMs));
@@ -67,7 +98,10 @@ export async function getDashboard(userId: string, startedOn: string) {
 
   return {
     points: totals?.points ?? 0,
+    /** Every finished session: chats, drills and check-ups. */
     sessions: totals?.sessions ?? 0,
+    /** Finished conversations only (chat, role-play, retell, fixes). */
+    chats: totals?.chats ?? 0,
     speakingMinutes: Math.round((totals?.speaking_seconds ?? 0) / 60),
     daysThisWeek,
     weeklyGoal,
@@ -119,16 +153,16 @@ export async function getCoachContext(userId: string) {
 
 export type CoachContext = NonNullable<Awaited<ReturnType<typeof getCoachContext>>>;
 
-// ── Clock helpers (the family's timezone) ───────────────────────────────────
+// ── Clock helpers (pass the learner's timezone: profileTimeZone / learnerTimeZone) ──
 
-/** Today's date (YYYY-MM-DD) in the app timezone. */
-export function localToday(now = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: APP_TIMEZONE }).format(now);
+/** Today's date (YYYY-MM-DD) in `timeZone` (default APP_TIMEZONE). */
+export function localToday(timeZone: string = APP_TIMEZONE, now = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: resolveTimeZone(timeZone) }).format(now);
 }
 
-/** The hour (0–23) in the app timezone. */
-export function localHour(now = new Date()) {
-  return Number(new Intl.DateTimeFormat("en-GB", { timeZone: APP_TIMEZONE, hour: "numeric", hourCycle: "h23" }).format(now)) % 24;
+/** The hour (0–23) in `timeZone` (default APP_TIMEZONE). */
+export function localHour(timeZone: string = APP_TIMEZONE, now = new Date()) {
+  return hourIn(now, resolveTimeZone(timeZone));
 }
 
 // ── Monthly check-ups ───────────────────────────────────────────────────────
@@ -142,12 +176,13 @@ export type CheckupRow = {
   cefr: string | null;
 };
 
-/** All her check-ups (oldest first), and whether one is due this journey month. */
-export async function getCheckupSummary(userId: string, startedOn: string) {
+/** All her check-ups (oldest first), and whether one is due this journey month. `day` is in her timezone. */
+export async function getCheckupSummary(userId: string, startedOn: string, timeZone?: string) {
+  const zone = timeZone ?? (await learnerTimeZone(userId));
   const list = await query<CheckupRow>(
     `select id, created_at::text, (created_at at time zone $2)::date::text as day, month, status, cefr
        from checkup where user_id = $1 order by created_at`,
-    [userId, APP_TIMEZONE],
+    [userId, zone],
   );
   const month = journeyMonthNumber(startedOn);
   return {
@@ -156,20 +191,21 @@ export async function getCheckupSummary(userId: string, startedOn: string) {
     due: !list.some((c) => c.month === month),
     first: list.length === 0,
     latest: list.at(-1) ?? null,
-    doneToday: list.some((c) => c.day === localToday()),
+    doneToday: list.some((c) => c.day === localToday(zone)),
   };
 }
 
 // ── Today's plan inputs ─────────────────────────────────────────────────────
 
 /** What the plan engine needs beyond the dashboard: today's activities, fresh mistakes, check-up state. */
-export async function getPlanContext(userId: string, startedOn: string) {
+export async function getPlanContext(userId: string, startedOn: string, timeZone?: string) {
+  const zone = timeZone ?? (await learnerTimeZone(userId));
   const [activities, mistakes, storiesToday, checkups] = await Promise.all([
     query<{ activity: string }>(
       `select distinct activity from coach_session
         where user_id = $1 and ended_at is not null
           and (started_at at time zone $2)::date = (now() at time zone $2)::date`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ),
     // Mistakes since her last "fix my mistakes" session (last 30 days at most)
     queryOne<{ n: number }>(
@@ -183,9 +219,9 @@ export async function getPlanContext(userId: string, startedOn: string) {
     queryOne<{ n: number }>(
       `select count(*)::int as n from story
         where user_id = $1 and (created_at at time zone $2)::date = (now() at time zone $2)::date`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ),
-    getCheckupSummary(userId, startedOn),
+    getCheckupSummary(userId, startedOn, zone),
   ]);
 
   const doneToday = new Set<BiteKind>();
@@ -206,14 +242,15 @@ export async function getPlanContext(userId: string, startedOn: string) {
 // ── Progress page ───────────────────────────────────────────────────────────
 
 /** Everything the Progress tab shows: totals, weekly minutes, Grow Together facts, check-ups. */
-export async function getProgressData(userId: string, startedOn: string) {
+export async function getProgressData(userId: string, startedOn: string, timeZone?: string) {
+  const zone = timeZone ?? (await learnerTimeZone(userId));
   const [sessions, weekly, words, wordCounts, drill90, checkups] = await Promise.all([
     query<{ date: string; at: string; seconds: number; points: number; activity: string }>(
       `select (started_at at time zone $2)::date::text as date, started_at::text as at,
               speaking_seconds as seconds, points, activity
          from coach_session where user_id = $1 and ended_at is not null
         order by started_at`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ),
     query<{ week: string; seconds: number }>(
       `select date_trunc('week', started_at at time zone $2)::date::text as week,
@@ -221,7 +258,7 @@ export async function getProgressData(userId: string, startedOn: string) {
          from coach_session
         where user_id = $1 and started_at > now() - interval '9 weeks'
         group by 1`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ),
     queryOne<{ n: number }>(`select count(*)::int as n from vocab_item where user_id = $1`, [userId]),
     query<{ n: number; date: string }>(
@@ -229,15 +266,15 @@ export async function getProgressData(userId: string, startedOn: string) {
          from (select created_at, row_number() over (order by created_at, id) as n
                  from vocab_item where user_id = $1) planted
         where n in (10, 50, 100, 250, 500)`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ),
     // Drills are optional (their table may not be migrated yet)
     queryOne<{ date: string | null }>(
       `select (min(created_at) at time zone $2)::date::text as date
          from drill_attempt where user_id = $1 and kind = 'shadow' and score >= 90`,
-      [userId, APP_TIMEZONE],
+      [userId, zone],
     ).catch(() => null),
-    getCheckupSummary(userId, startedOn),
+    getCheckupSummary(userId, startedOn, zone),
   ]);
 
   const facts: MomFacts = {

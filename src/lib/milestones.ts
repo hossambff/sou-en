@@ -1,5 +1,6 @@
 // Grow Together: the baby's milestones next to Sou's English milestones. Pure — safe on client and server.
 import { CITIES, LEVELS, babyAgeLabel, weekStartOf } from "./progress";
+import { isActivity } from "./scenarios";
 
 export type TimelineSide = "baby" | "mom";
 
@@ -133,9 +134,15 @@ export function momTimeline(facts: MomFacts, today: string) {
     }
   });
 
-  const first = sessions[0];
-  if (first) {
-    items.push({ id: "mom-first-session", side: "mom", date: first.date, emoji: "💬", title: "First session with Hossam", detail: "You showed up. That's the hardest part." });
+  // A real conversation (chat, role-play, retell, fixes): the day-1 check-up or a drill isn't a "first chat"
+  const firstChat = sessions.find((s) => isActivity(s.activity));
+  if (firstChat) {
+    items.push({ id: "mom-first-session", side: "mom", date: firstChat.date, emoji: "💬", title: "First chat with Hossam", detail: "You showed up. That's the hardest part." });
+  }
+
+  const firstDrill = sessions.find((s) => s.activity === "shadow" || s.activity === "review");
+  if (firstDrill) {
+    items.push({ id: "mom-first-drill", side: "mom", date: firstDrill.date, emoji: "🦜", title: "First drill", detail: "A few minutes of focused practice" });
   }
 
   const fiveMinutes = sessions.find((s) => s.seconds >= 300);

@@ -5,9 +5,11 @@ const db = vi.hoisted(() => ({
   queryOne: vi.fn<(text: string, params?: unknown[]) => Promise<unknown>>(),
 }));
 const auth = vi.hoisted(() => ({ userId: "user-1" as string | null }));
+const maintenance = vi.hoisted(() => ({ closeStaleSessions: vi.fn<(userId: string) => Promise<unknown[]>>(async () => []) }));
 
 vi.mock("@/lib/session", () => ({ getLearnerUserId: async () => auth.userId }));
 vi.mock("@/lib/db", () => db);
+vi.mock("@/lib/session-maintenance", () => maintenance);
 
 const { POST } = await import("./route");
 
@@ -22,6 +24,7 @@ function request(body: unknown) {
 beforeEach(() => {
   auth.userId = "user-1";
   db.queryOne.mockReset().mockResolvedValue({ id: "new-session" });
+  maintenance.closeStaleSessions.mockReset().mockResolvedValue([]);
 });
 
 describe("POST /api/session", () => {
@@ -55,6 +58,29 @@ describe("POST /api/session", () => {
       expect(response.status, JSON.stringify(body)).toBe(400);
     }
     expect(db.queryOne).not.toHaveBeenCalled();
+  });
+
+  it("closes her abandoned sessions before starting a new one", async () => {
+    const order: string[] = [];
+    maintenance.closeStaleSessions.mockImplementation(async () => {
+      order.push("close");
+      return [];
+    });
+    db.queryOne.mockImplementation(async () => {
+      order.push("insert");
+      return { id: "new-session" };
+    });
+    await POST(request({ minutes: 5 }));
+    expect(maintenance.closeStaleSessions).toHaveBeenCalledWith("user-1");
+    expect(order).toEqual(["close", "insert"]);
+  });
+
+  it("still starts the session if closing old ones fails", async () => {
+    maintenance.closeStaleSessions.mockRejectedValue(new Error("db hiccup"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await POST(request({ minutes: 5 }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: "new-session" });
   });
 
   it("answers 401 for anyone but the learner", async () => {

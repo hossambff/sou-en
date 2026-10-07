@@ -1,5 +1,6 @@
 // Today's plan: picks 1–3 bites that fit the minutes Sou has right now. Pure — safe on client and server.
 import { scenariosForLearner, sessionHref } from "./scenarios";
+import { isNightHour } from "./time-of-day";
 
 export type BiteKind = "checkup" | "review" | "shadow" | "chat" | "roleplay" | "retell" | "fixes" | "story";
 
@@ -32,39 +33,57 @@ export type PlanInput = {
   babyName: string | null;
   /** Activities she already did today. */
   doneToday: BiteKind[];
-  /** Total finished sessions ever (0 = brand new). */
+  /**
+   * Finished conversations ever: chat, role-play, retell, fixes (0 = she has never chatted with Hossam).
+   * Drills and check-ups don't count — they aren't a "first chat".
+   */
   totalSessions: number;
   /** Rotates role-play scenarios and talk styles day by day (see dayNumber). */
   dayIndex: number;
-  /** Unlocked role-plays, best fit first. Defaults to the month's unlocked scenarios. */
+  /** Role-plays at her level, best fit first. Defaults to the month's at-level scenarios. */
   scenarios?: PlanScenario[];
-  /** Mode she picked by hand (Whisper/Night); otherwise night hours mean night mode. */
+  /**
+   * The mode she picked (Normal, Whisper or Night). An explicit "normal" is honoured, even at night;
+   * leave it out and night hours (isNightHour) mean night mode.
+   */
   mode?: PlanMode;
 };
 
 export type PlanMode = "normal" | "whisper" | "night";
 
 function linkMode(input: PlanInput): PlanMode {
-  return input.mode ?? (isNight(input.hour) ? "night" : "normal");
+  return input.mode ?? (isNightHour(input.hour) ? "night" : "normal");
 }
 
 function drillHref(path: string, mode: PlanMode) {
   return mode === "normal" ? path : `${path}?mode=${mode}`;
 }
 
+/** Same threshold as the Home button and Practice hub (src/lib/time-of-day.ts). */
 export function isNight(hour: number) {
-  return hour >= 22 || hour < 6;
+  return isNightHour(hour);
 }
 
 export function isEvening(hour: number) {
   return hour >= 18 || hour < 6;
 }
 
-/** Time-of-day greeting, Darija + English. */
+/**
+ * Time-of-day greeting, Darija + English, for when she opens the app.
+ * Never "Good night" / "تصبحي على خير": those are goodbyes, and an English coach shouldn't model them as hellos.
+ */
 export function greetingFor(hour: number) {
-  if (hour >= 5 && hour < 12) return { en: "Good morning", ar: "صباح الخير" };
-  if (hour >= 12 && hour < 21) return { en: hour < 17 ? "Good afternoon" : "Good evening", ar: "مسا الخير" };
-  return { en: "Good night", ar: "تصبحي على خير" };
+  if (hour >= 5 && hour < 12) return { en: "Good morning", ar: "صباح الخير", late: false };
+  if (hour >= 12 && hour < 17) return { en: "Good afternoon", ar: "مسا الخير", late: false };
+  if (hour >= 17 && hour < 23) return { en: "Good evening", ar: "مسا الخير", late: false };
+  // A gentle hello for the 3 am feed
+  return { en: "Still up", ar: "باقا فايقة؟", late: true };
+}
+
+/** "Good evening, Sou" / "Still up, Sou?" */
+export function greetingLine(hour: number, name: string) {
+  const greeting = greetingFor(hour);
+  return greeting.late ? `${greeting.en}, ${name}?` : `${greeting.en}, ${name}`;
 }
 
 /** Days since 1970-01-01 for a YYYY-MM-DD date — a stable "day number" for rotations. */
@@ -81,12 +100,12 @@ function pick<T>(items: T[], index: number) {
 function scenarioList(input: PlanInput): PlanScenario[] {
   if (input.scenarios) return input.scenarios;
   return scenariosForLearner("A1", input.month)
-    .filter((item) => item.unlocked)
+    .filter((item) => item.atLevel)
     .map((item) => item.scenario);
 }
 
 function candidates(input: PlanInput): Candidate[] {
-  const night = isNight(input.hour);
+  const night = isNightHour(input.hour);
   const evening = isEvening(input.hour);
   const done = new Set(input.doneToday);
   const list: Candidate[] = [];

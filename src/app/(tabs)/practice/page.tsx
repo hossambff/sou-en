@@ -22,13 +22,12 @@ export default async function PracticePage() {
             (select count(*)::int from vocab_item where user_id = $1 and due <= now()) as due`,
     [user.id, RECENT_MISTAKE_DAYS],
   );
-  const scenarios = scenariosForLearner(profile.cefr_level, month).map(({ scenario, unlocked, unlocksInMonth }) => ({
+  const scenarios = scenariosForLearner(profile.cefr_level, month).map(({ scenario, harder }) => ({
     id: scenario.id,
     title: scenario.title,
     titleAr: scenario.titleAr,
     emoji: scenario.emoji,
-    unlocked,
-    unlocksInMonth,
+    harder,
   }));
 
   return (

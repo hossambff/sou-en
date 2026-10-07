@@ -27,10 +27,10 @@ export function cefrRank(level: string | null | undefined) {
 }
 
 /**
- * Journey month at which a level's scenarios unlock even if her CEFR estimate hasn't been
- * updated yet (the curriculum arc in PRD §6.3), so content never stays locked forever.
+ * Journey month at which a level counts as "her level" even if her CEFR estimate hasn't been
+ * updated yet (the curriculum arc in PRD §6.3).
  */
-const UNLOCK_MONTH: Record<Cefr, number> = { A1: 1, A2: 2, B1: 4, B2: 6, C1: 7, C2: 7 };
+const AT_LEVEL_MONTH: Record<Cefr, number> = { A1: 1, A2: 2, B1: 4, B2: 6, C1: 7, C2: 7 };
 
 export type Scenario = {
   id: string;
@@ -167,30 +167,55 @@ export function getScenario(id: string | null | undefined): Scenario | null {
   return SCENARIOS.find((scenario) => scenario.id === id) ?? null;
 }
 
-export function scenarioUnlocked(scenario: Scenario, level: string | null | undefined, month: number) {
-  return cefrRank(level) >= cefrRank(scenario.minLevel) || month >= UNLOCK_MONTH[scenario.minLevel];
+/**
+ * Is this scenario at (or below) her level — by her CEFR estimate, or by where the journey month
+ * says she should be? Nothing is ever locked: a scenario above her level is just "a bit harder".
+ */
+export function scenarioAtLevel(scenario: Scenario, level: string | null | undefined, month: number) {
+  return cefrRank(level) >= cefrRank(scenario.minLevel) || month >= AT_LEVEL_MONTH[scenario.minLevel];
+}
+
+export type LearnerScenario = {
+  scenario: Scenario;
+  /** At or below her level: what Today's plan suggests. */
+  atLevel: boolean;
+  /** Above her level: still playable from day 1, shown with a soft "a bit harder" tag. */
+  harder: boolean;
+  /** @deprecated Every scenario is playable now; this is the same as `atLevel`. */
+  unlocked: boolean;
+};
+
+/**
+ * Every scenario, in level order: the ones at her level first (closest to her level first, so the
+ * stretch is right), then the harder ones (easiest first). All of them are playable from day 1 —
+ * a new mom needs "Pediatrician visit" and "Book a vaccine" now, not in month 2.
+ */
+export function scenariosForLearner(level: string | null | undefined, month: number): LearnerScenario[] {
+  const rank = cefrRank(level);
+  const all = SCENARIOS.map((scenario, index) => ({ scenario, index, atLevel: scenarioAtLevel(scenario, level, month) }));
+  const distance = (s: Scenario) => Math.abs(rank - cefrRank(s.minLevel));
+  const now = all
+    .filter((item) => item.atLevel)
+    .sort((a, b) => distance(a.scenario) - distance(b.scenario) || a.index - b.index);
+  const harder = all
+    .filter((item) => !item.atLevel)
+    .sort((a, b) => cefrRank(a.scenario.minLevel) - cefrRank(b.scenario.minLevel) || a.index - b.index);
+  return [...now, ...harder].map(({ scenario, atLevel }) => ({ scenario, atLevel, harder: !atLevel, unlocked: atLevel }));
 }
 
 /**
- * Scenarios for the practice hub: unlocked ones first (closest to her level first, so the
- * stretch is right), then the locked ones she will reach later (easiest first).
+ * Builds a drill URL that keeps the mode she picked (Whisper / Night change the voice volume and
+ * speed and the whisper-sensitive speech detector). Normal mode adds nothing.
  */
-export function scenariosForLearner(level: string | null | undefined, month: number) {
-  const rank = cefrRank(level);
-  const all = SCENARIOS.map((scenario, index) => ({
-    scenario,
-    index,
-    unlocked: scenarioUnlocked(scenario, level, month),
-    unlocksInMonth: UNLOCK_MONTH[scenario.minLevel],
-  }));
-  const distance = (s: Scenario) => Math.abs(rank - cefrRank(s.minLevel));
-  const open = all
-    .filter((item) => item.unlocked)
-    .sort((a, b) => distance(a.scenario) - distance(b.scenario) || a.index - b.index);
-  const later = all
-    .filter((item) => !item.unlocked)
-    .sort((a, b) => cefrRank(a.scenario.minLevel) - cefrRank(b.scenario.minLevel) || a.index - b.index);
-  return [...open, ...later].map(({ scenario, unlocked, unlocksInMonth }) => ({ scenario, unlocked, unlocksInMonth }));
+export function drillHref(
+  drill: "shadow" | "review",
+  options: { mode: "normal" | "whisper" | "night"; set?: "due" | "newest" },
+) {
+  const params = new URLSearchParams();
+  if (drill === "review" && options.set === "newest") params.set("set", "newest");
+  if (options.mode !== "normal") params.set("mode", options.mode);
+  const query = params.toString();
+  return query ? `/drill/${drill}?${query}` : `/drill/${drill}`;
 }
 
 /** Builds the /session URL for an activity. Unknown scenarios are dropped. */

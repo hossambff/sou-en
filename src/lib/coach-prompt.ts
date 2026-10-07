@@ -5,10 +5,36 @@ import type { CoachContext } from "./learner";
 export type SessionMode = "normal" | "whisper" | "night";
 export const SESSION_MODES = ["normal", "whisper", "night"] as const satisfies readonly SessionMode[];
 
+/** A correction from a session recap (coach_session.golden_fixes). */
+export type GoldenFix = { said: string; better: string; tip?: string | null };
+
 /** The parts of the coach context the activity blocks need (keeps them easy to test). */
 type ActivityContext = Pick<CoachContext, "month" | "recentErrors"> & {
   profile: Pick<CoachContext["profile"], "cefr_level" | "baby_name">;
+  /** Golden fixes from her recent recaps — what the recap's "Practice fixes" button promised. */
+  goldenFixes?: GoldenFix[];
 };
+
+const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+/** Recap golden fixes first (that's what she was shown), then logged mistakes not already covered. */
+export function mistakesToDrill(ctx: Pick<ActivityContext, "recentErrors" | "goldenFixes">) {
+  const items: Array<{ original: string; corrected: string; note: string }> = [];
+  const seen = new Set<string>();
+  for (const fix of ctx.goldenFixes ?? []) {
+    const key = normalize(fix.said);
+    if (!key || !fix.better.trim() || seen.has(key)) continue;
+    seen.add(key);
+    items.push({ original: fix.said, corrected: fix.better, note: fix.tip?.trim() ? `from her recap; tip: ${fix.tip.trim()}` : "from her recap" });
+  }
+  for (const error of ctx.recentErrors) {
+    const key = normalize(error.original);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    items.push({ original: error.original, corrected: error.corrected, note: error.category });
+  }
+  return items.slice(0, 10);
+}
 
 /** Sessions with an unknown activity, or a role-play without a valid scenario, are free talk. */
 export function resolveActivity(activity: string | null | undefined, scenarioId: string | null | undefined) {
@@ -49,9 +75,9 @@ function retellBlock(ctx: ActivityContext) {
 }
 
 function fixesBlock(ctx: ActivityContext) {
-  const errors = ctx.recentErrors;
+  const errors = mistakesToDrill(ctx);
   const list = errors.length
-    ? errors.map((e, i) => `  ${i + 1}. She said "${e.original}" → better: "${e.corrected}" (${e.category})`).join("\n")
+    ? errors.map((e, i) => `  ${i + 1}. She said "${e.original}" → better: "${e.corrected}" (${e.note})`).join("\n")
     : `  She has no saved mistakes yet. Use classic traps for Arabic and French speakers at her level instead: "I have 30 years" → "I'm 30", "He go" → "He goes", "Where you live?" → "Where do you live?", "My husband, she is tired" → "My husband is tired" (he/she mix-ups), "I am agree" → "I agree", p/b ("park"/"bark").`;
   return `# Today's activity: FIX MY MISTAKES (focused practice on her recent mistakes)
 - Her recent mistakes, most recent first:
@@ -100,6 +126,8 @@ export function buildCoachInstructions(
     elapsedSeconds: number;
     activity?: string;
     scenario?: string | null;
+    /** For the "fixes" activity: golden fixes from her recent recaps. */
+    goldenFixes?: GoldenFix[];
   },
 ) {
   const { profile, month } = ctx;
@@ -170,7 +198,7 @@ ${profile.why_english ? `- Why she wants English: ${profile.why_english}\n` : ""
       : ""
   }
 
-${activityInstructions(activity, scenario, ctx)}
+${activityInstructions(activity, scenario, { ...ctx, goldenFixes: session.goldenFixes })}
 
 # What you know about her
 ${ctx.memories.length ? ctx.memories.map((m) => `- ${m}`).join("\n") : "- Nothing yet. This may be your first chat, so introduce yourself warmly and with a joke."}

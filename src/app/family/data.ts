@@ -1,6 +1,6 @@
 import "server-only";
 import { query, queryOne } from "@/lib/db";
-import { APP_TIMEZONE, getDashboard, getProfile } from "@/lib/learner";
+import { getDashboard, getProfile, localToday, profileTimeZone } from "@/lib/learner";
 import { CITIES, levelFor, monthOfJourney } from "@/lib/progress";
 import { squadBadges, type SessionWin } from "./wins";
 
@@ -8,34 +8,38 @@ import { squadBadges, type SessionWin } from "./wins";
 export async function getSquadView(learnerId: string) {
   const profile = await getProfile(learnerId);
   if (!profile) return null;
+  // Same "today" as her Home screen and her reminders: her own timezone
+  const zone = profileTimeZone(profile);
 
   const [dash, week, recent, stats] = await Promise.all([
-    getDashboard(learnerId, profile.started_on),
+    getDashboard(learnerId, profile.started_on, zone),
     queryOne<{ seconds: number }>(
       `select coalesce(sum(speaking_seconds), 0)::int as seconds from coach_session
         where user_id = $1 and started_at at time zone $2 >= date_trunc('week', now() at time zone $2)`,
-      [learnerId, APP_TIMEZONE],
+      [learnerId, zone],
     ),
     query<SessionWin>(
       `select (started_at at time zone $2)::date::text as day, speaking_seconds as seconds, points, activity, scenario
          from coach_session
         where user_id = $1 and (ended_at is not null or speaking_seconds > 0)
         order by started_at desc limit 5`,
-      [learnerId, APP_TIMEZONE],
+      [learnerId, zone],
     ),
-    queryOne<{ night: number; whisper: number; roleplays: number; best_seconds: number; days: number }>(
+    queryOne<{ night: number; whisper: number; roleplays: number; drills: number; practices: number; best_seconds: number; days: number }>(
       `select count(*) filter (where mode = 'night' and speaking_seconds > 0)::int as night,
               count(*) filter (where mode = 'whisper' and speaking_seconds > 0)::int as whisper,
               count(*) filter (where activity = 'roleplay' and ended_at is not null)::int as roleplays,
+              count(*) filter (where activity in ('shadow', 'review') and ended_at is not null)::int as drills,
+              count(*) filter (where activity is distinct from 'checkup' and ended_at is not null)::int as practices,
               coalesce(max(speaking_seconds), 0)::int as best_seconds,
               (count(distinct (started_at at time zone $2)::date) filter (where speaking_seconds > 0))::int as days
          from coach_session where user_id = $1`,
-      [learnerId, APP_TIMEZONE],
+      [learnerId, zone],
     ),
   ]);
 
   const month = monthOfJourney(profile.started_on);
-  const today = new Intl.DateTimeFormat("en-CA", { timeZone: APP_TIMEZONE }).format(new Date());
+  const today = localToday(zone);
   return {
     firstName: profile.first_name,
     babyName: profile.baby_name,
@@ -56,7 +60,9 @@ export async function getSquadView(learnerId: string) {
     city: CITIES[month - 1],
     recent,
     badges: squadBadges({
-      sessions: dash.sessions,
+      chats: dash.chats,
+      drills: stats?.drills ?? 0,
+      sessions: stats?.practices ?? 0,
       daysPracticed: stats?.days ?? 0,
       nightSessions: stats?.night ?? 0,
       whisperSessions: stats?.whisper ?? 0,

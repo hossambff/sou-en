@@ -1,15 +1,14 @@
-import { getMember, getUser } from "@/lib/session";
-import { bumpUsage, getUsage } from "@/lib/usage";
+import { getLearnerUserId } from "@/lib/session";
+import { DAILY_STT_LIMIT, bumpUsage, getUsage } from "@/lib/usage";
 
 export const maxDuration = 30;
 
 const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
-const DAILY_STT_LIMIT = Number(process.env.DAILY_STT_LIMIT ?? 1500);
 
 /** Speech-to-text with ElevenLabs Scribe (auto-detects Darija / French / English, handles code-switching). */
 export async function POST(request: Request) {
-  const user = await getUser();
-  if (!user || !(await getMember(user.id))) return new Response("Unauthorized", { status: 401 });
+  // Only Sou speaks to Hossam (sessions, drills, check-ups, Quick Ask)
+  if (!(await getLearnerUserId())) return new Response("Unauthorized", { status: 401 });
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) return new Response("Speech-to-text is not configured", { status: 501 });
   if ((await getUsage("stt_calls")) >= DAILY_STT_LIMIT) return new Response("Daily listening limit reached", { status: 429 });

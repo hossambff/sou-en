@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { KICKOFF_EVENTS, activityInstructions, buildCoachInstructions, kickoffText, resolveActivity } from "./coach-prompt";
+import {
+  KICKOFF_EVENTS,
+  activityInstructions,
+  buildCoachInstructions,
+  kickoffText,
+  mistakesToDrill,
+  resolveActivity,
+} from "./coach-prompt";
 import { getScenario } from "./scenarios";
 import type { CoachContext } from "./learner";
 
@@ -88,6 +95,44 @@ describe("buildCoachInstructions", () => {
     const prompt = buildCoachInstructions(context(), { ...session, activity: "fixes" });
     expect(prompt).toContain("FIX MY MISTAKES");
     expect(prompt).toContain('She said "He have a vaccine tomorrow" → better: "He has a vaccine tomorrow" (grammar)');
+  });
+
+  it("fix-my-mistakes drills the golden fixes from her recaps first", () => {
+    const prompt = buildCoachInstructions(context(), {
+      ...session,
+      activity: "fixes",
+      goldenFixes: [{ said: "I have 30 years", better: "I'm 30", tip: "قولي I'm 30" }],
+    });
+    const golden = prompt.indexOf('She said "I have 30 years" → better: "I\'m 30" (from her recap; tip: قولي I\'m 30)');
+    const logged = prompt.indexOf('She said "He have a vaccine tomorrow"');
+    expect(golden).toBeGreaterThan(-1);
+    expect(logged).toBeGreaterThan(golden);
+    expect(prompt).not.toContain("no saved mistakes yet");
+  });
+
+  it("golden fixes alone are enough (nothing in the mistake log)", () => {
+    const text = activityInstructions("fixes", null, {
+      ...context({ recentErrors: [] }),
+      goldenFixes: [{ said: "He go", better: "He goes" }],
+    });
+    expect(text).toContain('She said "He go" → better: "He goes" (from her recap)');
+    expect(text).not.toContain("no saved mistakes yet");
+  });
+
+  it("doesn't drill the same mistake twice", () => {
+    const items = mistakesToDrill({
+      goldenFixes: [
+        { said: "He have a vaccine tomorrow!", better: "He has a vaccine tomorrow!" },
+        { said: "", better: "skip me" },
+      ],
+      recentErrors: [{ original: "he have a vaccine tomorrow", corrected: "He has a vaccine tomorrow", category: "grammar" }],
+    });
+    expect(items).toEqual([{ original: "He have a vaccine tomorrow!", corrected: "He has a vaccine tomorrow!", note: "from her recap" }]);
+  });
+
+  it("only the fixes activity mentions the golden fixes", () => {
+    const prompt = buildCoachInstructions(context(), { ...session, goldenFixes: [{ said: "I have 30 years", better: "I'm 30" }] });
+    expect(prompt).not.toContain("from her recap");
   });
 
   it("fix-my-mistakes still works with no saved mistakes", () => {

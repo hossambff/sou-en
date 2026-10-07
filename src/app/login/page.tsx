@@ -12,7 +12,7 @@ export default async function LoginPage() {
         </p>
         <h1 className="font-display mt-1 text-center text-4xl font-semibold tracking-tight">Sou Coach</h1>
         <p className="mt-2 text-center text-ink-soft">Your English coach who speaks Darija.</p>
-        <LoginForm />
+        <LoginForm resetEnabled={process.env.EMAIL_ENABLED === "1"} />
       </div>
     </main>
   );

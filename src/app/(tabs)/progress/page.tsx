@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireLearner } from "@/lib/session";
-import { getProfile, getProgressData, localToday } from "@/lib/learner";
+import { getProfile, getProgressData, localToday, profileTimeZone } from "@/lib/learner";
 import {
   CEFR_INFO,
   CITIES,
@@ -23,8 +23,10 @@ export default async function ProgressPage() {
   const profile = await getProfile(user.id);
   if (!profile) redirect("/onboarding");
 
-  const data = await getProgressData(user.id, profile.started_on);
-  const today = localToday();
+  // Same "today" as Home and her reminders: her own timezone
+  const timeZone = profileTimeZone(profile);
+  const data = await getProgressData(user.id, profile.started_on, timeZone);
+  const today = localToday(timeZone);
   const month = monthOfJourney(profile.started_on);
   const level = levelFor(data.totals.points);
   const band = isCefrBand(profile.cefr_level) ? profile.cefr_level : "A1";
@@ -139,7 +141,7 @@ export default async function ProgressPage() {
                   <Link href={`/checkup/${checkup.id}`} className="flex min-h-14 items-center gap-3 py-2">
                     <span
                       className={`grid size-11 shrink-0 place-items-center rounded-full font-display font-semibold ${
-                        checkup.cefr ? "bg-terra text-white" : "bg-bg-deep text-ink-soft"
+                        checkup.cefr ? "bg-terra text-on-accent" : "bg-bg-deep text-ink-soft"
                       }`}
                     >
                       {checkup.cefr ?? "…"}
@@ -216,6 +218,8 @@ export default async function ProgressPage() {
                     <p className="text-xs text-ink-soft">
                       Month {i + 1}
                       {state === "here" ? " · you are here" : state === "done" ? " · visited ✓" : ""}
+                      {/* "Ahead" is only greyed out visually: say it for screen readers too */}
+                      {state === "ahead" && <span className="sr-only"> · not yet</span>}
                     </p>
                     <p className="font-medium">
                       {city.name} · {city.theme}{" "}

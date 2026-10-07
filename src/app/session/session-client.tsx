@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Speaker, takeSentences } from "@/lib/voice/speaker";
-import { Listener } from "@/lib/voice/listener";
+import { Listener, type ListenFailureReason, type ListenResult } from "@/lib/voice/listener";
 import { COMMAND_TOAST, detectCommand, type VoiceCommandKind } from "@/lib/voice/commands";
 import { ACTIVITY_INFO, type Activity } from "@/lib/scenarios";
 import type { SessionMode } from "@/lib/coach-prompt";
+import { ScreenWake } from "@/lib/screen-wake";
+import { useNightTheme } from "@/lib/use-night-theme";
+import { MixedText } from "./mixed-text";
 
 type Phase =
   | "ready" // waiting for the first tap (unlocks audio + mic)
@@ -25,7 +28,16 @@ type Phase =
 
 type Line = { role: "coach" | "sou"; text: string };
 type CoachRequest = { text?: string; event?: "start" | "resume" | "timeUp"; speakingSeconds?: number; cheerFrom?: string };
-type Message = { en: string; ar?: string };
+type Message = {
+  en: string;
+  ar?: string;
+  /** false = trying again won't help (daily limit): no retry hint, the orb rests. */
+  retry?: boolean;
+  /** What a tap on the orb retries: listening again, or the last coach turn (default). */
+  action?: "listen" | "coach";
+  /** The server already closed this session: show the recap. */
+  ended?: boolean;
+};
 type Notice = Message & { title: string };
 
 const PHASE_LABEL: Record<Phase, { en: string; ar: string }> = {
@@ -45,8 +57,11 @@ const PHASE_LABEL: Record<Phase, { en: string; ar: string }> = {
 
 /** The session clock only runs while she is actually practicing. */
 const CLOCK_PHASES = new Set<Phase>(["thinking", "speaking", "listening", "hearing", "transcribing"]);
-/** The screen may sleep before the start, while paused for the baby, and once she's done. */
-const SCREEN_MAY_SLEEP = new Set<Phase>(["ready", "paused", "ending"]);
+/**
+ * The screen may sleep whenever nothing will happen without a tap: before the start, paused for the baby,
+ * waiting in idle, on an error, at "time's up", and once she's done.
+ */
+const SCREEN_MAY_SLEEP = new Set<Phase>(["ready", "paused", "idle", "error", "wrapped", "ending"]);
 /** The prompt tells Hossam to wrap up in the last 30 seconds; the app follows the same line. */
 const WRAP_UP_SECONDS = 30;
 
@@ -57,14 +72,25 @@ const READY_HINT: Record<Activity, string> = {
   fixes: "A few of your recent slips, turned into quick wins. Zero shame.",
 };
 
-// 10 ms of silence: played inside the start tap so iOS lets us play the cheer later
-const SILENT_WAV =
-  "data:audio/wav;base64,UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
 const GENERIC_PROBLEM: Message = {
   en: "Connection hiccup. Tap to try again.",
   ar: "شي مشكل فالكونيكسيون، ضغطي باش نعاودو",
 };
+
+/** When listening fails (not just silence), what she sees. */
+const LISTEN_PROBLEM: Record<ListenFailureReason, Message> = {
+  limit: { en: "I've listened a lot today. Let's continue tomorrow!", ar: "سمعتك بزاف اليوم، نكملو غدا إن شاء الله", retry: false },
+  service: { en: "I can't hear you right now. Tap and say it again.", ar: "ما قدرتش نسمعك دابا، ضغطي وعاودي", action: "listen" },
+  network: { en: "I couldn't hear that, the connection is weak. Tap and say it again.", ar: "الكونيكسيون ضعيفة، ضغطي وعاودي", action: "listen" },
+  mic: { en: "The microphone stopped. Tap to turn it back on.", ar: "الميكرو تقطع، ضغطي باش نرجعوه", action: "listen" },
+};
+
+/** Gentle notes shown while waiting for her (idle). */
+const HINT = {
+  unclear: { en: "I didn't catch that. Say it again?", ar: "ما سمعتكش مزيان، عاوديها؟" },
+  whisper: { en: "I couldn't catch that. A tiny bit louder?", ar: "ما سمعتكش، علّي صوتك غير شوية؟" },
+  phone: { en: "I'll listen with the phone for now. Say it again?", ar: "غادي نسمعك بالتيليفون دابا، عاوديها؟" },
+} satisfies Record<string, Message>;
 
 class CoachError extends Error {
   constructor(public detail: Message) {
@@ -76,50 +102,42 @@ class CoachError extends Error {
 async function problemFrom(response: Response): Promise<Message> {
   const raw = await response.text().catch(() => "");
   try {
-    const data = JSON.parse(raw) as { error?: unknown; ar?: unknown };
+    const data = JSON.parse(raw) as { error?: unknown; ar?: unknown; retry?: unknown; ended?: unknown };
     if (typeof data.error === "string" && data.error) {
-      return { en: data.error, ar: typeof data.ar === "string" ? data.ar : undefined };
+      return {
+        en: data.error,
+        ar: typeof data.ar === "string" ? data.ar : undefined,
+        ...(data.retry === false ? { retry: false } : {}),
+        ...(data.ended === true ? { ended: true } : {}),
+      };
     }
   } catch {}
   if (response.status === 429 || response.status === 503) return { en: raw.slice(0, 200) || GENERIC_PROBLEM.en };
   return GENERIC_PROBLEM;
 }
 
-/** Keeps the screen on during a session (Screen Wake Lock API, when the browser has it). */
-class ScreenWake {
-  private lock: WakeLockSentinel | null = null;
-  private wanted = false;
-  private pending = false;
+/** Closes the session without waiting (the app is being closed or left without Finish). */
+function endInBackground(id: string) {
+  const url = `/api/session/${id}/end`;
+  try {
+    if (navigator.sendBeacon?.(url)) return;
+  } catch {}
+  void fetch(url, { method: "POST", keepalive: true }).catch(() => {});
+}
 
-  async keepOn() {
-    this.wanted = true;
-    if (this.lock || this.pending || !("wakeLock" in navigator) || document.visibilityState !== "visible") return;
-    this.pending = true;
-    try {
-      const lock = await navigator.wakeLock.request("screen");
-      if (!this.wanted) return void lock.release().catch(() => {});
-      this.lock = lock;
-      lock.addEventListener("release", () => {
-        if (this.lock === lock) this.lock = null;
-      });
-    } catch {
-      // Low battery mode, unsupported, or not allowed: the session still works
-    } finally {
-      this.pending = false;
-    }
-  }
+const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 
-  allowOff() {
-    this.wanted = false;
-    const lock = this.lock;
-    this.lock = null;
-    void lock?.release().catch(() => {});
-  }
-
-  /** The browser drops the lock when the app is hidden; take it back when she returns. */
-  restore() {
-    if (this.wanted) void this.keepOn();
-  }
+/** iOS "Reduce Motion" / Android "Remove animations". */
+function usePrefersReducedMotion() {
+  return useSyncExternalStore(
+    (onChange) => {
+      const query = window.matchMedia(REDUCED_MOTION);
+      query.addEventListener("change", onChange);
+      return () => query.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(REDUCED_MOTION).matches,
+    () => false,
+  );
 }
 
 export function SessionClient(props: {
@@ -131,6 +149,8 @@ export function SessionClient(props: {
   scenario: { id: string; title: string; titleAr: string; emoji: string } | null;
   serverVoice: boolean;
   serverStt: boolean;
+  /** Her Settings speed, also used by the phone's voice. */
+  speechRate: number;
 }) {
   const router = useRouter();
   const backHref = props.activity === "chat" ? "/" : "/practice";
@@ -142,6 +162,9 @@ export function SessionClient(props: {
   const [showTranscript, setShowTranscript] = useState(false);
   const [browserLang, setBrowserLang] = useState(props.month <= 2 ? "ar-MA" : "en-US");
   const [problem, setProblem] = useState<Message | null>(null);
+  const [hint, setHint] = useState<Message | null>(null);
+  const [sttServer, setSttServer] = useState(props.serverStt);
+  const [sessionStarted, setSessionStarted] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [cheer, setCheer] = useState<{ fromName: string; text: string } | null>(null);
   const [toast, setToast] = useState<{ id: number; icon: string; en: string; ar: string } | null>(null);
@@ -159,9 +182,13 @@ export function SessionClient(props: {
   const phaseRef = useRef<Phase>("ready");
   const sessionRef = useRef<string | null>(null);
   const finishing = useRef(false);
-  const cheerAudio = useRef<HTMLAudioElement | null>(null);
   const stopCheer = useRef<(() => void) | null>(null);
   const toastTimer = useRef(0);
+  /** The session was closed in the background (app closed / left); a page restored from cache shows the recap. */
+  const endedInBackground = useRef(false);
+  const reducedMotion = usePrefersReducedMotion();
+  // Night sessions: the whole document turns night (html background, status bar), not just this <main>
+  useNightTheme(props.mode === "night");
 
   const browserLangRef = useRef(browserLang);
 
@@ -169,7 +196,8 @@ export function SessionClient(props: {
   function go(next: Phase) {
     phaseRef.current = next;
     setPhase(next);
-    // Screen stays on for the whole session (Wake Lock), except while paused or saving.
+    if (next !== "idle") setHint(null);
+    // Screen stays on while something is happening; it may sleep while everything waits for her tap.
     if (SCREEN_MAY_SLEEP.has(next)) wake.allowOff();
     else void wake.keepOn();
   }
@@ -201,6 +229,29 @@ export function SessionClient(props: {
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [wake]);
 
+  // Leaving without Finish still saves her points and recap: the app being closed (pagehide → beacon),
+  // or navigating away (unmount). If iOS kills the app silently, the server closes it later.
+  useEffect(() => {
+    const endNow = () => {
+      const id = sessionRef.current;
+      if (!id || finishing.current) return;
+      finishing.current = true;
+      endedInBackground.current = true;
+      endInBackground(id);
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      const id = sessionRef.current;
+      if (event.persisted && endedInBackground.current && id) window.location.replace(`/recap/${id}`);
+    };
+    window.addEventListener("pagehide", endNow);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      window.removeEventListener("pagehide", endNow);
+      window.removeEventListener("pageshow", onPageShow);
+      endNow();
+    };
+  }, []);
+
   useEffect(
     () => () => {
       turn.current++;
@@ -208,7 +259,6 @@ export function SessionClient(props: {
       speaker.current?.stop();
       listener.current?.dispose();
       stopCheer.current?.();
-      cheerAudio.current?.pause();
       wake.allowOff();
       window.clearTimeout(toastTimer.current);
     },
@@ -224,14 +274,36 @@ export function SessionClient(props: {
   async function listenTurn() {
     const myTurn = ++turn.current;
     go("listening");
-    const utterance = await listener.current!.listen({
-      whisper: props.mode === "whisper",
-      browserLang: browserLangRef.current,
-      onLevel: setLevel,
-      onSpeechStart: () => myTurn === turn.current && go("hearing"),
-    });
+    const mic = listener.current;
+    const micFailed: ListenResult = { kind: "failed", reason: "mic", status: 0, switchedToPhone: false };
+    const result = mic
+      ? await mic
+          .hear({
+            whisper: props.mode === "whisper",
+            browserLang: browserLangRef.current,
+            onLevel: setLevel,
+            onSpeechStart: () => myTurn === turn.current && go("hearing"),
+          })
+          .catch(() => micFailed)
+      : micFailed;
     if (myTurn !== turn.current) return;
-    if (!utterance) return go("idle");
+    if (mic && !mic.usingServerStt) setSttServer(false); // show the Darija/English picker for the phone's recognition
+
+    // Silence is not a failure: wait for her tap. A failure says what happened instead of looking like silence.
+    if (result.kind === "silence") return go("idle");
+    if (result.kind === "unclear") {
+      setHint(props.mode === "whisper" ? HINT.whisper : HINT.unclear);
+      return go("idle");
+    }
+    if (result.kind === "failed") {
+      if (result.switchedToPhone) {
+        setHint(HINT.phone);
+        return go("idle");
+      }
+      setProblem(LISTEN_PROBLEM[result.reason]);
+      return go("error");
+    }
+    const utterance = result;
 
     // "repeat", "بشوية", "stop"… are handled right here; help requests still go to Hossam.
     const command = detectCommand(utterance.text, { lastCoachLine: lastCoachLine.current });
@@ -249,7 +321,8 @@ export function SessionClient(props: {
     void coachTurn({ text: utterance.text, speakingSeconds: utterance.seconds });
   }
 
-  async function coachTurn(request: CoachRequest) {
+  /** @param retry the same request again after an error (the server then won't save her words twice) */
+  async function coachTurn(request: CoachRequest, retry = false) {
     const myTurn = ++turn.current;
     lastRequest.current = request;
     setProblem(null);
@@ -263,7 +336,14 @@ export function SessionClient(props: {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: abort.current.signal,
-        body: JSON.stringify({ sessionId: sessionRef.current, elapsedSeconds: elapsedRef.current, ...request }),
+        body: JSON.stringify({
+          sessionId: sessionRef.current,
+          elapsedSeconds: elapsedRef.current,
+          // "+5 min" only exists on this screen: the server needs it so Hossam doesn't say goodbye too early
+          minutesPlanned: limitRef.current,
+          retry,
+          ...request,
+        }),
       });
       if (!response.ok || !response.body) throw new CoachError(await problemFrom(response));
 
@@ -300,43 +380,18 @@ export function SessionClient(props: {
     } catch (error) {
       if (myTurn !== turn.current) return;
       console.error(error);
-      setProblem(error instanceof CoachError ? error.detail : GENERIC_PROBLEM);
+      // Don't keep talking over the error (a retry would overlap the old reply with the new one)
+      speaker.current?.stop();
+      const detail = error instanceof CoachError ? error.detail : GENERIC_PROBLEM;
+      if (detail.ended && sessionRef.current) {
+        // The server already closed this session (she was away a long time): her recap is ready
+        finishing.current = true;
+        go("ending");
+        return router.replace(`/recap/${sessionRef.current}`);
+      }
+      setProblem(detail);
       go("error");
     }
-  }
-
-  /** Plays one URL on the element unlocked in the start tap. Resolves true if she actually heard it. */
-  function playCheerAudio(url: string) {
-    return new Promise<boolean>((resolve) => {
-      const audio = cheerAudio.current;
-      if (!audio) return resolve(false);
-      let started = false;
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(safety);
-        audio.onplaying = audio.onended = audio.onerror = null;
-        stopCheer.current = null;
-        resolve(started);
-      };
-      const safety = setTimeout(() => {
-        audio.pause();
-        done();
-      }, 3 * 60_000);
-      stopCheer.current = () => {
-        audio.pause();
-        done();
-      };
-      audio.onplaying = () => {
-        started = true;
-      };
-      audio.onended = done;
-      audio.onerror = done;
-      audio.volume = props.mode === "night" ? 0.6 : props.mode === "whisper" ? 0.8 : 1;
-      audio.src = url;
-      audio.play().catch(done);
-    });
   }
 
   /** A short pause to read a text-only cheer (skippable). */
@@ -354,8 +409,11 @@ export function SessionClient(props: {
     });
   }
 
-  /** A voice cheer from family (Cheer Squad), played once before Hossam's first words. Never blocks the session. */
-  async function playPendingCheer(): Promise<string | null> {
+  /**
+   * A voice cheer from family (Cheer Squad), played once before Hossam's first words. Never blocks the session.
+   * Played through Hossam's speaker, so night/whisper volume applies on iPhone too.
+   */
+  async function playPendingCheer(myStart: number): Promise<string | null> {
     try {
       const response = await fetch("/api/cheers/pending", { cache: "no-store" });
       if (response.status !== 200) return null;
@@ -365,11 +423,30 @@ export function SessionClient(props: {
       const text = typeof data.text === "string" ? data.text.trim() : "";
       const audioUrl = typeof data.audioUrl === "string" ? data.audioUrl : "";
       if (!audioUrl && !text) return null;
+      if (myStart !== turn.current) return null;
 
       setCheer({ fromName, text });
       go("cheer");
-      const heard = audioUrl ? await playCheerAudio(audioUrl) : await readingPause(Math.min(8000, 2500 + text.length * 60));
-      if (heard) void fetch(`/api/cheers/${encodeURIComponent(data.id)}/played`, { method: "POST" }).catch(() => {});
+      let heard = false;
+      if (audioUrl) {
+        let skipped = false;
+        stopCheer.current = () => {
+          skipped = true;
+          speaker.current?.stop();
+        };
+        const clip = await fetch(audioUrl)
+          .then((r) => (r.ok ? r.blob() : null))
+          .catch(() => null);
+        if (clip && !skipped && myStart === turn.current && speaker.current) heard = await speaker.current.playRecording(clip);
+        heard ||= skipped;
+        stopCheer.current = null;
+      }
+      // A clip that can't play still shows its note, so her family's words reach her
+      if (!heard && text && myStart === turn.current) heard = await readingPause(Math.min(8000, 2500 + text.length * 60));
+      // Handled once shown (unless she left with Baby / Finish): a broken clip must not block newer cheers
+      if (heard || myStart === turn.current) {
+        void fetch(`/api/cheers/${encodeURIComponent(data.id)}/played`, { method: "POST" }).catch(() => {});
+      }
       return heard ? fromName : null;
     } catch {
       return null;
@@ -402,15 +479,10 @@ export function SessionClient(props: {
     go("thinking");
     // Everything that needs the tap happens before the first await
     speaker.current ??= new Speaker(props.serverVoice);
-    speaker.current.unlock();
     speaker.current.volume = props.mode === "night" ? 0.6 : props.mode === "whisper" ? 0.8 : 1;
     speaker.current.slow = slow;
-    if (!cheerAudio.current) {
-      cheerAudio.current = new Audio();
-      cheerAudio.current.setAttribute("playsinline", "true");
-    }
-    cheerAudio.current.src = SILENT_WAV;
-    cheerAudio.current.play().catch(() => {});
+    speaker.current.rate = props.speechRate;
+    speaker.current.unlock(); // after volume: quiet modes start their Web Audio inside this tap
     listener.current ??= new Listener(props.serverStt);
     const myStart = ++turn.current;
 
@@ -443,6 +515,7 @@ export function SessionClient(props: {
         if (!response.ok) throw new CoachError(await problemFrom(response));
         const { id } = (await response.json()) as { id: string };
         sessionRef.current = id;
+        setSessionStarted(true);
       } catch (error) {
         if (myStart !== turn.current) return;
         setProblem(error instanceof CoachError ? error.detail : { en: "Couldn't start. Check your connection.", ar: "ما قدرناش نبداو، شوفي الكونيكسيون" });
@@ -450,12 +523,12 @@ export function SessionClient(props: {
       }
       if (myStart !== turn.current) return;
 
-      const cheerFrom = await playPendingCheer();
+      const cheerFrom = await playPendingCheer(myStart);
       if (myStart !== turn.current) return; // she tapped Baby or Finish during the cheer
       setCheer(null);
       return void coachTurn(cheerFrom ? { event: "start", cheerFrom } : { event: "start" });
     }
-    void coachTurn(lastRequest.current ?? { event: "start" });
+    void coachTurn(lastRequest.current ?? { event: "start" }, Boolean(lastRequest.current));
   }
 
   function onOrbTap() {
@@ -473,11 +546,14 @@ export function SessionClient(props: {
         go("transcribing");
         return listener.current?.finish();
       case "idle":
+        speaker.current?.unlock(); // a fresh tap: re-arm audio in case iOS suspended it meanwhile
         return void listenTurn();
       case "error":
+        if (problem?.retry === false) return; // e.g. the daily limit: trying again won't help today
         if (!sessionRef.current || !listener.current) return void start();
         speaker.current?.unlock();
-        return void coachTurn(lastRequest.current ?? { event: "start" });
+        if (problem?.action === "listen") return void listenTurn();
+        return void coachTurn(lastRequest.current ?? { event: "start" }, Boolean(lastRequest.current));
     }
   }
 
@@ -534,7 +610,8 @@ export function SessionClient(props: {
     router.replace(`/recap/${sessionRef.current}`);
   }
 
-  const label = PHASE_LABEL[phase];
+  const label = phase === "idle" && hint ? hint : PHASE_LABEL[phase];
+  const resting = phase === "error" && problem?.retry === false;
   const caption = [...lines].reverse().find((line) => line.role === "coach" && line.text)?.text;
   const remaining = Math.max(0, limitMinutes * 60 - elapsed);
   const night = props.mode === "night";
@@ -605,7 +682,9 @@ export function SessionClient(props: {
       <section className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center px-6">
         <button
           onClick={onOrbTap}
-          disabled={phase === "thinking" || phase === "transcribing" || phase === "ending" || phase === "paused" || phase === "wrapped"}
+          disabled={
+            phase === "thinking" || phase === "transcribing" || phase === "ending" || phase === "paused" || phase === "wrapped" || resting
+          }
           className="relative grid size-56 place-items-center rounded-full outline-none focus-visible:ring-4 focus-visible:ring-terra-soft"
           aria-label={label.en}
         >
@@ -627,7 +706,7 @@ export function SessionClient(props: {
                     ? "bg-gradient-to-br from-saffron to-terra"
                     : "bg-gradient-to-br from-terra to-terra-deep"
             } ${phase === "speaking" || phase === "ready" || phase === "cheer" ? "animate-breathe" : ""}`}
-            style={active ? { transform: `scale(${1 + level * 0.18})` } : undefined}
+            style={active && !reducedMotion ? { transform: `scale(${1 + level * 0.18})` } : undefined}
           >
             <OrbIcon phase={phase} />
           </span>
@@ -639,7 +718,17 @@ export function SessionClient(props: {
         <p className="ar text-center text-sm text-ink-soft" dir="rtl">
           {phase === "error" && problem ? (problem.ar ?? label.ar) : label.ar}
         </p>
-        {phase === "error" && problem && <p className="mt-1 text-center text-xs text-ink-soft">Tap the button to try again.</p>}
+        {phase === "error" && problem && !resting && (
+          <p className="mt-1 text-center text-xs text-ink-soft">Tap the button to try again.</p>
+        )}
+        {resting && (
+          <button
+            onClick={finish}
+            className="mt-4 min-h-11 rounded-full bg-terra px-6 font-medium text-on-accent shadow-card active:scale-[0.98] motion-reduce:active:scale-100"
+          >
+            {sessionStarted ? "See my recap" : "Back home"}
+          </button>
+        )}
 
         {phase === "ready" && !notice && (
           <p className="mt-6 max-w-xs text-center text-sm text-ink-soft">
@@ -664,9 +753,9 @@ export function SessionClient(props: {
           <div className="mt-6 w-full rounded-3xl border border-line bg-card p-4 text-center shadow-card animate-rise">
             <p className="font-medium">💛 {cheer.fromName} sent you a cheer</p>
             {cheer.text && (
-              <p dir="auto" className="mt-1 text-sm text-ink-soft">
-                {cheer.text}
-              </p>
+              <div className="mt-1 text-sm text-ink-soft">
+                <MixedText text={cheer.text} />
+              </div>
             )}
             <button onClick={() => stopCheer.current?.()} className="mt-2 min-h-11 rounded-full px-4 text-sm text-ink-soft">
               Skip ›
@@ -675,12 +764,9 @@ export function SessionClient(props: {
         )}
 
         {caption && !showTranscript && phase !== "ready" && phase !== "cheer" && (
-          <p
-            dir="auto"
-            className="mt-6 max-h-40 w-full overflow-y-auto rounded-3xl bg-card/80 px-5 py-4 text-center text-[17px] leading-relaxed shadow-card backdrop-blur"
-          >
-            {caption}
-          </p>
+          <div className="mt-6 max-h-40 w-full overflow-y-auto rounded-3xl bg-card/80 px-5 py-4 text-center text-[17px] leading-relaxed shadow-card backdrop-blur">
+            <MixedText text={caption} />
+          </div>
         )}
 
         {showTranscript && (
@@ -695,7 +781,7 @@ export function SessionClient(props: {
                     line.role === "coach" ? "bg-card shadow-card" : "ml-auto bg-mint-soft text-ink"
                   }`}
                 >
-                  {line.text}
+                  {line.role === "coach" ? <MixedText text={line.text} /> : line.text}
                 </li>
               ))}
           </ol>
@@ -703,10 +789,16 @@ export function SessionClient(props: {
 
         {phase === "wrapped" && (
           <div className="mt-6 grid w-full grid-cols-2 gap-3 animate-rise">
-            <button onClick={keepGoing} className="rounded-2xl border border-line bg-card py-4 font-medium shadow-card active:scale-[0.98]">
+            <button
+              onClick={keepGoing}
+              className="rounded-2xl border border-line bg-card py-4 font-medium shadow-card active:scale-[0.98] motion-reduce:active:scale-100"
+            >
               +5 min
             </button>
-            <button onClick={finish} className="rounded-2xl bg-terra py-4 font-medium text-white shadow-card active:scale-[0.98]">
+            <button
+              onClick={finish}
+              className="rounded-2xl bg-terra py-4 font-medium text-on-accent shadow-card active:scale-[0.98] motion-reduce:active:scale-100"
+            >
               See my recap
             </button>
           </div>
@@ -718,7 +810,7 @@ export function SessionClient(props: {
           {phase === "paused" ? (
             <button
               onClick={resume}
-              className="col-span-2 rounded-3xl bg-mint py-5 text-lg font-semibold text-white shadow-card active:scale-[0.98]"
+              className="col-span-2 rounded-3xl bg-mint py-5 text-lg font-semibold text-on-accent shadow-card active:scale-[0.98] motion-reduce:active:scale-100"
             >
               I&apos;m back <span className="ar font-normal opacity-90">· رجعت</span>
             </button>
@@ -726,21 +818,21 @@ export function SessionClient(props: {
             <>
               <button
                 onClick={babyPause}
-                className="rounded-3xl bg-saffron py-5 text-lg font-semibold text-ink shadow-card active:scale-[0.98]"
+                className="rounded-3xl bg-saffron py-5 text-lg font-semibold text-on-saffron shadow-card active:scale-[0.98] motion-reduce:active:scale-100"
               >
                 👶 Baby! <span className="ar text-base font-normal">· البيبي</span>
               </button>
               <button
                 onClick={repeatLast}
                 disabled={phase === "thinking" || phase === "transcribing" || phase === "cheer" || !caption}
-                className="rounded-3xl border border-line bg-card px-5 text-sm font-medium shadow-card active:scale-[0.98] disabled:opacity-50"
+                className="rounded-3xl border border-line bg-card px-5 text-sm font-medium shadow-card active:scale-[0.98] disabled:opacity-50 motion-reduce:active:scale-100"
                 aria-label="Repeat what Hossam said"
               >
                 ↻ Repeat
               </button>
             </>
           )}
-          {!props.serverStt && phase !== "paused" && (
+          {!sttServer && phase !== "paused" && (
             <div className="col-span-2 flex items-center justify-center gap-2 text-xs text-ink-soft">
               I&apos;m speaking:
               {[
@@ -750,7 +842,7 @@ export function SessionClient(props: {
                 <button
                   key={value}
                   onClick={() => setBrowserLang(value)}
-                  className={`min-h-9 rounded-full px-3 py-1 ${browserLang === value ? "bg-ink text-bg" : "bg-card"}`}
+                  className={`min-h-11 rounded-full px-4 py-1 ${browserLang === value ? "bg-ink text-bg" : "bg-card"}`}
                 >
                   {text}
                 </button>
@@ -764,7 +856,7 @@ export function SessionClient(props: {
 }
 
 function OrbIcon({ phase }: { phase: Phase }) {
-  const common = "size-14 text-white";
+  const common = "size-14 text-on-accent";
   if (phase === "paused") return <span className="text-5xl">👶</span>;
   if (phase === "cheer") return <span className="text-5xl">💛</span>;
   if (phase === "listening" || phase === "hearing")
@@ -778,7 +870,11 @@ function OrbIcon({ phase }: { phase: Phase }) {
     return (
       <span className="flex gap-1.5">
         {[0, 150, 300].map((delay) => (
-          <span key={delay} className="size-3 animate-bounce rounded-full bg-white" style={{ animationDelay: `${delay}ms` }} />
+          <span
+            key={delay}
+            className="size-3 animate-bounce rounded-full bg-on-accent motion-reduce:animate-none"
+            style={{ animationDelay: `${delay}ms` }}
+          />
         ))}
       </span>
     );

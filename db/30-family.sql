@@ -23,6 +23,8 @@ create table if not exists push_subscription (
   created_at  timestamptz not null default now()
 );
 create index if not exists push_subscription_user on push_subscription (user_id);
+-- Last time the owner's browser confirmed this subscription: the per-user cap drops the stalest first.
+alter table push_subscription add column if not exists updated_at timestamptz not null default now();
 
 -- At most one notification of each kind per person per (local) day.
 create table if not exists notification_log (

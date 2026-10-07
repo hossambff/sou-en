@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
+import { forgetPushOnThisDevice } from "@/components/pwa/push-device";
 
 type Props = {
   /** "link": small header button (default). "button": full-width row for Settings. */
@@ -15,6 +16,8 @@ export function SignOutButton({ variant = "link" }: Props) {
 
   async function signOut() {
     setBusy(true);
+    // While still signed in: this device stops getting this person's notifications (never throws, max 4 s)
+    await forgetPushOnThisDevice();
     await authClient.signOut().catch(() => {});
     router.replace("/login");
     router.refresh();

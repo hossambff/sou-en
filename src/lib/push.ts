@@ -1,14 +1,9 @@
 import "server-only";
 import { WebPushError, sendNotification, setVapidDetails } from "web-push";
 import { query } from "./db";
-import {
-  REMINDER_TITLE,
-  REMINDER_URL,
-  partnerWinDecision,
-  reminderDecision,
-  reminderMessage,
-  safeTimeZone,
-} from "./reminders";
+import { resolveTimeZone } from "./learner";
+import { MAX_PUSH_SUBSCRIPTIONS_PER_USER, isAllowedPushEndpoint } from "./push-endpoint";
+import { REMINDER_TITLE, REMINDER_URL, partnerWinDecision, reminderDecision, reminderMessage } from "./reminders";
 
 /**
  * Web Push (VAPID). Works on Android/desktop browsers, and on iPhone only once the app
@@ -44,17 +39,55 @@ function ensureVapid() {
   return true;
 }
 
-export async function saveSubscription(userId: string, subscription: PushSubscriptionInput, userAgent?: string | null) {
-  await query(
+export type SaveSubscriptionResult = "saved" | "owned-by-another-user" | "invalid-endpoint";
+
+/**
+ * Store (or refresh) this device's subscription for `userId`.
+ *
+ * An endpoint already registered to someone else is never moved over: a device's notifications can't be
+ * taken by whoever signs in next (e.g. Hossam opening /family on Sou's phone). The browser has to make a
+ * brand-new subscription instead (PushToggle does that only when the person explicitly turns them on),
+ * which also invalidates the old one; its row is cleaned up on the next 404/410 from the push service.
+ *
+ * Each person keeps at most MAX_PUSH_SUBSCRIPTIONS_PER_USER devices: the stalest are dropped.
+ */
+export async function saveSubscription(
+  userId: string,
+  subscription: PushSubscriptionInput,
+  userAgent?: string | null,
+): Promise<SaveSubscriptionResult> {
+  if (!isAllowedPushEndpoint(subscription.endpoint)) return "invalid-endpoint";
+  const rows = await query<{ user_id: string }>(
     `insert into push_subscription (endpoint, user_id, p256dh, auth, user_agent) values ($1, $2, $3, $4, $5)
      on conflict (endpoint) do update
-       set user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent`,
+       set p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent, updated_at = now()
+       where push_subscription.user_id = excluded.user_id
+     returning user_id`,
     [subscription.endpoint, userId, subscription.keys.p256dh, subscription.keys.auth, userAgent?.slice(0, 300) ?? null],
   );
+  if (rows.length === 0) return "owned-by-another-user";
+  await query(
+    `delete from push_subscription
+      where endpoint in (select endpoint from push_subscription where user_id = $1
+                          order by updated_at desc, created_at desc offset $2)`,
+    [userId, MAX_PUSH_SUBSCRIPTIONS_PER_USER],
+  );
+  return "saved";
 }
 
+/** Forget one of this person's devices. Returns how many rows went (0 if it wasn't theirs). */
 export async function deleteSubscription(userId: string, endpoint: string) {
-  await query(`delete from push_subscription where user_id = $1 and endpoint = $2`, [userId, endpoint]);
+  const rows = await query(`delete from push_subscription where user_id = $1 and endpoint = $2 returning endpoint`, [userId, endpoint]);
+  return rows.length;
+}
+
+/**
+ * Forget every device of this person (e.g. when their role changes or the account goes away).
+ * For a plain sign-out, prefer forgetting just that device (DELETE /api/push/subscribe from the browser).
+ */
+export async function removeSubscriptionsForUser(userId: string) {
+  const rows = await query(`delete from push_subscription where user_id = $1 returning endpoint`, [userId]);
+  return rows.length;
 }
 
 export async function hasSubscription(userId: string) {
@@ -70,10 +103,17 @@ export async function sendPushToUser(userId: string, payload: PushPayload) {
   const result = { sent: 0, removed: 0, failed: 0 };
   if (!ensureVapid()) return result;
 
-  const subscriptions = await query<{ endpoint: string; p256dh: string; auth: string }>(
-    `select endpoint, p256dh, auth from push_subscription where user_id = $1`,
-    [userId],
+  const all = await query<{ endpoint: string; p256dh: string; auth: string }>(
+    `select endpoint, p256dh, auth from push_subscription where user_id = $1 order by updated_at desc limit $2`,
+    [userId, MAX_PUSH_SUBSCRIPTIONS_PER_USER],
   );
+  // Rows saved before the push-service allowlist existed: never POST to them, drop them
+  const subscriptions = all.filter(({ endpoint }) => isAllowedPushEndpoint(endpoint));
+  const rejected = all.filter(({ endpoint }) => !isAllowedPushEndpoint(endpoint)).map(({ endpoint }) => endpoint);
+  if (rejected.length > 0) {
+    await query(`delete from push_subscription where endpoint = any($1::text[])`, [rejected]);
+    result.removed += rejected.length;
+  }
   const body = JSON.stringify(payload);
 
   await Promise.all(
@@ -166,7 +206,7 @@ export async function runDailyReminders(now = new Date()) {
     }
     const decision = reminderDecision({
       now,
-      timeZone: safeTimeZone(learner.timezone),
+      timeZone: resolveTimeZone(learner.timezone),
       reminderHour: learner.reminder_hour,
       lastPracticedAt: learner.last_practiced_at,
       lastReminderDay: learner.last_reminder_day,
@@ -204,7 +244,7 @@ export async function notifySquadOfWin(now = new Date(), learnerUserId?: string)
   );
 
   for (const learner of learners) {
-    const timeZone = safeTimeZone(learner.timezone);
+    const timeZone = resolveTimeZone(learner.timezone);
     for (const partner of partners) {
       const decision = partnerWinDecision({
         now,

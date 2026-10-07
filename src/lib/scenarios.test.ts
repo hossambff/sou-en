@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SCENARIOS, cefrRank, getScenario, isActivity, scenarioUnlocked, scenariosForLearner, sessionHref } from "./scenarios";
+import { SCENARIOS, cefrRank, drillHref, getScenario, isActivity, scenarioAtLevel, scenariosForLearner, sessionHref } from "./scenarios";
 
 describe("scenarios catalogue", () => {
   it("has about ten well-formed scenarios with unique ids", () => {
@@ -33,28 +33,39 @@ describe("levels", () => {
     expect(cefrRank("pre-A1")).toBe(0);
   });
 
-  it("unlocks by level or by journey month", () => {
+  it("is at her level by CEFR estimate or by journey month", () => {
     const interview = getScenario("job-interview")!;
     const pediatrician = getScenario("pediatrician")!;
-    expect(scenarioUnlocked(pediatrician, "A1", 1)).toBe(false);
-    expect(scenarioUnlocked(pediatrician, "A2", 1)).toBe(true);
-    expect(scenarioUnlocked(pediatrician, "A1", 2)).toBe(true);
-    expect(scenarioUnlocked(interview, "B1", 5)).toBe(false);
-    expect(scenarioUnlocked(interview, "B2", 1)).toBe(true);
-    expect(scenarioUnlocked(interview, "A2", 6)).toBe(true);
+    expect(scenarioAtLevel(pediatrician, "A1", 1)).toBe(false);
+    expect(scenarioAtLevel(pediatrician, "A2", 1)).toBe(true);
+    expect(scenarioAtLevel(pediatrician, "A1", 2)).toBe(true);
+    expect(scenarioAtLevel(interview, "B1", 5)).toBe(false);
+    expect(scenarioAtLevel(interview, "B2", 1)).toBe(true);
+    expect(scenarioAtLevel(interview, "A2", 6)).toBe(true);
   });
 
-  it("lists unlocked scenarios first, closest to her level", () => {
+  it("offers every scenario from day 1, at-level first, harder ones tagged (never locked)", () => {
     const beginner = scenariosForLearner("A1", 1);
     expect(beginner).toHaveLength(SCENARIOS.length);
-    const firstLocked = beginner.findIndex((item) => !item.unlocked);
-    expect(beginner.slice(firstLocked).every((item) => !item.unlocked)).toBe(true);
-    expect(beginner.filter((item) => item.unlocked).every((item) => item.scenario.minLevel === "A1")).toBe(true);
+    // A new mom can open the pediatrician and vaccine role-plays on day 1: just tagged "a bit harder"
+    for (const id of ["pediatrician", "vaccine-call"]) {
+      const item = beginner.find((entry) => entry.scenario.id === id)!;
+      expect(item.harder, id).toBe(true);
+      expect(item.atLevel, id).toBe(false);
+    }
+    const firstHarder = beginner.findIndex((item) => item.harder);
+    expect(beginner.slice(firstHarder).every((item) => item.harder)).toBe(true);
+    expect(beginner.filter((item) => item.atLevel).every((item) => item.scenario.minLevel === "A1")).toBe(true);
+    expect(beginner.every((item) => item.harder === !item.atLevel && item.unlocked === item.atLevel)).toBe(true);
+    // Harder ones go easiest first
+    const harderRanks = beginner.filter((item) => item.harder).map((item) => cefrRank(item.scenario.minLevel));
+    expect(harderRanks).toEqual([...harderRanks].sort((a, b) => a - b));
     expect(beginner.at(-1)!.scenario.id).toBe("job-interview");
 
     const intermediate = scenariosForLearner("B1", 4);
     expect(intermediate[0].scenario.minLevel).toBe("B1");
-    expect(intermediate.find((item) => item.scenario.id === "job-interview")!.unlocked).toBe(false);
+    expect(intermediate.find((item) => item.scenario.id === "job-interview")!.harder).toBe(true);
+    expect(intermediate.find((item) => item.scenario.id === "pediatrician")!.harder).toBe(false);
   });
 });
 
@@ -75,5 +86,21 @@ describe("sessionHref", () => {
     expect(isActivity("retell")).toBe(true);
     expect(isActivity("drill")).toBe(false);
     expect(isActivity(undefined)).toBe(false);
+  });
+});
+
+describe("drillHref", () => {
+  it("keeps the mode she picked, and nothing extra in normal mode", () => {
+    expect(drillHref("shadow", { mode: "normal" })).toBe("/drill/shadow");
+    expect(drillHref("shadow", { mode: "night" })).toBe("/drill/shadow?mode=night");
+    expect(drillHref("review", { mode: "whisper" })).toBe("/drill/review?mode=whisper");
+    expect(drillHref("review", { mode: "normal", set: "due" })).toBe("/drill/review");
+  });
+
+  it("opens her newest words when nothing is due", () => {
+    expect(drillHref("review", { mode: "normal", set: "newest" })).toBe("/drill/review?set=newest");
+    expect(drillHref("review", { mode: "night", set: "newest" })).toBe("/drill/review?set=newest&mode=night");
+    // "newest" only means something for Say It Back
+    expect(drillHref("shadow", { mode: "whisper", set: "newest" })).toBe("/drill/shadow?mode=whisper");
   });
 });

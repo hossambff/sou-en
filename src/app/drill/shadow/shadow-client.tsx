@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useNightTheme } from "@/lib/use-night-theme";
 import { FOCUS_TIPS, type ShadowItem } from "@/lib/drill-phrases";
 import { TIER_COPY, drillTotals, scoreShadow, type ShadowScore, type WordMark } from "@/lib/scoring";
 import { SpeakButton } from "@/components/speak-button";
@@ -10,6 +11,7 @@ import {
   DrillMain,
   DrillOrb,
   MIC_HELP,
+  NoticeText,
   ProgressDots,
   ScoreRing,
   newRunId,
@@ -18,6 +20,7 @@ import {
   type DrillMode,
   type OrbState,
 } from "../drill-ui";
+import { listenNotice, type Notice } from "../listen-notice";
 
 type Phase =
   | "ready" // first tap unlocks audio + mic
@@ -65,9 +68,16 @@ type Summary = { points: number; average: number; speakingSeconds: number; saved
 
 const emptyRun = (): Run => ({ id: "", startedAt: 0, speaking: 0, attempts: [], pending: [] });
 
-export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMode; serverVoice: boolean; serverStt: boolean }) {
+export function ShadowClient(props: {
+  initialItems: ShadowItem[];
+  mode: DrillMode;
+  serverVoice: boolean;
+  serverStt: boolean;
+  speechRate: number;
+}) {
   const router = useRouter();
   const voice = useDrillVoice(props);
+  useNightTheme(props.mode === "night");
   const [items, setItems] = useState(props.initialItems);
   const [index, setIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>("ready");
@@ -75,7 +85,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
   const [best, setBest] = useState<(number | null)[]>(() => props.initialItems.map(() => null));
   const [level, setLevel] = useState(0);
   const [slow, setSlow] = useState(props.mode === "night");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
 
   // Loop state lives in refs so async turns never read stale values
@@ -96,6 +106,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
     const item = itemsRef.current[indexRef.current];
     if (!item) return;
     setResult(null);
+    setNotice(null);
     go("speaking");
     await voice.say(item.en, slowRef.current);
     if (myTurn !== turn.current) return;
@@ -107,8 +118,9 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
     const item = itemsRef.current[indexRef.current];
     const itemIndex = indexRef.current;
     if (!item) return;
+    setNotice(null);
     go("listening");
-    const utterance = await voice.hear({
+    const heard = await voice.hear({
       browserLang: "en-US",
       noSpeechTimeoutMs: 12_000,
       onLevel: setLevel,
@@ -117,16 +129,20 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
       },
     });
     if (myTurn !== turn.current) return;
-    if (!utterance) return go("idle");
+    if (heard.kind !== "heard") {
+      // Not heard clearly / can't listen right now: say so, never just reset
+      setNotice(listenNotice(heard, { whisper: props.mode === "whisper" }));
+      return go("idle");
+    }
 
-    const score = scoreShadow(item.en, utterance.text);
-    run.current.speaking += utterance.seconds;
+    const score = scoreShadow(item.en, heard.text);
+    run.current.speaking += heard.seconds;
     run.current.attempts.push({ target: item.en, score: score.score });
     run.current.pending.push(
-      postJson("/api/drill/attempt", { kind: "shadow", runId: run.current.id, target: item.en, heard: utterance.text }),
+      postJson("/api/drill/attempt", { kind: "shadow", runId: run.current.id, target: item.en, heard: heard.text }),
     );
     setBest((current) => current.map((value, i) => (i === itemIndex ? Math.max(value ?? 0, score.score) : value)));
-    setResult({ score, heard: utterance.text });
+    setResult({ score, heard: heard.text });
     go("result");
   }
 
@@ -235,7 +251,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
         <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
           <p className="text-5xl">🎧</p>
           <p className="font-display text-2xl font-semibold">No phrases right now</p>
-          <Link href="/practice" className="rounded-2xl bg-terra px-6 py-4 font-medium text-white shadow-card">
+          <Link href="/practice" className="rounded-2xl bg-terra px-6 py-4 font-medium text-on-accent shadow-card">
             Back to practice
           </Link>
         </div>
@@ -302,15 +318,15 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
             </ul>
           </section>
 
-          {notice && <p className="text-center text-sm text-terra">{notice}</p>}
+          {notice && <NoticeText notice={notice} className="mx-auto" />}
           <div className="grid grid-cols-2 gap-3 pb-4">
             <Link
               href="/practice"
-              className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card active:scale-[0.98]"
+              className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card motion-safe:active:scale-[0.98]"
             >
               Done
             </Link>
-            <button onClick={practiceMore} className="rounded-2xl bg-terra py-4 font-medium text-white shadow-card active:scale-[0.98]">
+            <button onClick={practiceMore} className="rounded-2xl bg-terra py-4 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]">
               Practice more <span className="ar text-sm opacity-90">· زيدي</span>
             </button>
           </div>
@@ -322,17 +338,20 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
   const item = items[index];
   const tip = FOCUS_TIPS[item.focus];
   const label = LABEL[phase];
-  const busy = phase === "transcribing" || phase === "loading" || phase === "saving";
+  // Finish / Baby / Skip stay usable while her answer is being transcribed (a stalled network
+  // mustn't freeze the screen; they bump the turn so a late result is ignored)
+  const busy = phase === "loading" || phase === "saving";
+  const waiting = busy || phase === "transcribing";
 
   return (
     <DrillMain night={props.mode === "night"}>
       <header className="mx-auto flex w-full max-w-md items-center justify-between gap-2 px-4">
         {phase === "ready" ? (
-          <Link href="/practice" className="rounded-full px-3 py-2 text-sm text-ink-soft">
+          <Link href="/practice" className="flex min-h-11 items-center rounded-full px-3 text-sm text-ink-soft">
             ‹ Back
           </Link>
         ) : (
-          <button onClick={finish} disabled={busy} className="rounded-full px-3 py-2 text-sm text-ink-soft">
+          <button onClick={finish} disabled={busy} className="min-h-11 rounded-full px-3 text-sm text-ink-soft">
             Finish
           </button>
         )}
@@ -340,7 +359,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
         <button
           onClick={toggleSlow}
           aria-pressed={slow}
-          className={`rounded-full px-3 py-2 text-sm transition ${slow ? "bg-ink text-bg" : "text-ink-soft"}`}
+          className={`min-h-11 rounded-full px-3 text-sm transition ${slow ? "bg-ink text-bg" : "text-ink-soft"}`}
         >
           🐢 Slow
         </button>
@@ -379,7 +398,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
               level={level}
               onTap={onOrbTap}
               label={label.en}
-              disabled={busy || phase === "paused"}
+              disabled={waiting || phase === "paused"}
             />
             <p className="mt-4 text-center font-medium" aria-live="polite">
               {label.en}
@@ -392,7 +411,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
                 Hossam says a phrase, you say it right after him. Copy his music, not just the words.
               </p>
             )}
-            {notice && <p className="mt-3 max-w-xs text-center text-sm text-terra">{notice}</p>}
+            {notice && <NoticeText notice={notice} className="mt-3" />}
           </div>
         )}
       </section>
@@ -403,18 +422,18 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => void playThenListen()}
-                className="rounded-3xl border border-line bg-card py-4 text-lg font-medium shadow-card active:scale-[0.98]"
+                className="rounded-3xl border border-line bg-card py-4 text-lg font-medium shadow-card motion-safe:active:scale-[0.98]"
               >
                 ↻ Again <span className="ar text-base font-normal text-ink-soft">· عاودي</span>
               </button>
-              <button onClick={next} className="rounded-3xl bg-terra py-4 text-lg font-semibold text-white shadow-card active:scale-[0.98]">
+              <button onClick={next} className="rounded-3xl bg-terra py-4 text-lg font-semibold text-on-accent shadow-card motion-safe:active:scale-[0.98]">
                 {index + 1 < items.length ? "Next ›" : "Finish 🎉"}
               </button>
             </div>
           ) : phase === "paused" ? (
             <button
               onClick={resume}
-              className="w-full rounded-3xl bg-mint py-5 text-lg font-semibold text-white shadow-card active:scale-[0.98]"
+              className="w-full rounded-3xl bg-mint py-5 text-lg font-semibold text-on-accent shadow-card motion-safe:active:scale-[0.98]"
             >
               I&apos;m back <span className="ar font-normal opacity-90">· رجعت</span>
             </button>
@@ -423,14 +442,14 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
               <button
                 onClick={babyPause}
                 disabled={busy}
-                className="rounded-3xl bg-saffron py-5 text-lg font-semibold text-ink shadow-card active:scale-[0.98]"
+                className="rounded-3xl bg-saffron py-5 text-lg font-semibold text-on-saffron shadow-card motion-safe:active:scale-[0.98]"
               >
                 👶 Baby! <span className="ar text-base font-normal">· البيبي</span>
               </button>
               <button
                 onClick={() => void playThenListen()}
-                disabled={busy}
-                className="rounded-3xl border border-line bg-card px-4 text-xl shadow-card active:scale-[0.98]"
+                disabled={waiting}
+                className="rounded-3xl border border-line bg-card px-4 text-xl shadow-card motion-safe:active:scale-[0.98]"
                 aria-label="Hear it again"
               >
                 🔊
@@ -438,7 +457,7 @@ export function ShadowClient(props: { initialItems: ShadowItem[]; mode: DrillMod
               <button
                 onClick={next}
                 disabled={busy}
-                className="rounded-3xl border border-line bg-card px-4 text-sm font-medium shadow-card active:scale-[0.98]"
+                className="rounded-3xl border border-line bg-card px-4 text-sm font-medium shadow-card motion-safe:active:scale-[0.98]"
               >
                 Skip ›
               </button>

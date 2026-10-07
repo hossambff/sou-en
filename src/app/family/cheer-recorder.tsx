@@ -65,6 +65,8 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
   const allLevelsRef = useRef<number[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const takeUrlRef = useRef<string | null>(null);
+  /** False once the recorder is gone (he left the page), so a late-opening mic is closed straight away. */
+  const mountedRef = useRef(true);
 
   function releaseMic() {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -84,15 +86,16 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
     setProgress(0);
   }
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       if (recorderRef.current?.state === "recording") recorderRef.current.stop();
       releaseMic();
       audioRef.current?.pause();
       if (takeUrlRef.current) URL.revokeObjectURL(takeUrlRef.current);
-    },
-    [],
-  );
+    };
+  }, []);
 
   async function start() {
     setError(null);
@@ -103,6 +106,11 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      // He left while "Opening the mic…": close it now instead of recording on a page that's gone
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       const mimeType = pickMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: 64_000 } : undefined);
@@ -254,7 +262,7 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
         <button
           onClick={start}
           disabled={phase === "starting"}
-          className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98] disabled:opacity-70"
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98] disabled:opacity-70"
         >
           <span aria-hidden>🎙️</span> {phase === "starting" ? "Opening the mic…" : "Record a cheer"}
         </button>
@@ -265,7 +273,7 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
           <Waveform bars={levels} live />
           <div className="mt-3 flex items-center justify-between">
             <span className="flex items-center gap-2 text-sm font-medium text-terra" aria-live="polite">
-              <span className="size-2.5 animate-pulse rounded-full bg-terra" /> Recording · {remaining}s left
+              <span className="size-2.5 animate-pulse rounded-full bg-terra motion-reduce:animate-none" /> Recording · {remaining}s left
             </span>
             <span className="font-display text-lg tabular-nums">0:{String(Math.floor(elapsed)).padStart(2, "0")}</span>
           </div>
@@ -284,7 +292,7 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
             <button
               onClick={togglePlay}
               aria-label={playing ? "Pause" : "Play your cheer"}
-              className="grid size-12 shrink-0 place-items-center rounded-full bg-terra text-white shadow-card transition active:scale-95"
+              className="grid size-12 shrink-0 place-items-center rounded-full bg-terra text-on-accent shadow-card transition active:scale-95"
             >
               {playing ? "❚❚" : "▶︎"}
             </button>
@@ -325,7 +333,7 @@ export function CheerRecorder({ learnerName }: { learnerName: string }) {
               <button
                 onClick={send}
                 disabled={phase === "sending"}
-                className="min-h-12 rounded-2xl bg-mint text-base font-medium text-white shadow-card transition active:scale-[0.98] disabled:opacity-60"
+                className="min-h-12 rounded-2xl bg-mint text-base font-medium text-on-accent shadow-card transition active:scale-[0.98] disabled:opacity-60"
               >
                 {phase === "sending" ? "Sending…" : take ? "Send cheer 💌" : "Send note 💌"}
               </button>

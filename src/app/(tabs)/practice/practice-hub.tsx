@@ -2,8 +2,9 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { ACTIVITY_INFO, sessionHref, type Activity } from "@/lib/scenarios";
+import { ACTIVITY_INFO, drillHref, sessionHref, type Activity } from "@/lib/scenarios";
 import type { SessionMode } from "@/lib/coach-prompt";
+import { hourIn, isNightHour } from "@/lib/time-of-day";
 
 const MINUTES = [3, 5, 10, 20];
 const MODES: { value: SessionMode; label: string; icon: string; hint: string }[] = [
@@ -17,13 +18,13 @@ export type ScenarioTile = {
   title: string;
   titleAr: string;
   emoji: string;
-  unlocked: boolean;
-  unlocksInMonth: number;
+  /** Above her level: still playable, with a soft "a bit harder" tag */
+  harder: boolean;
 };
 
+/** Night between 22:00 and 06:00 on her phone, same as Home. */
 function defaultMode(): SessionMode {
-  const hour = new Date().getHours();
-  return hour >= 23 || hour < 6 ? "night" : "normal";
+  return isNightHour(hourIn(new Date())) ? "night" : "normal";
 }
 
 export function PracticeHub(props: {
@@ -55,8 +56,6 @@ export function PracticeHub(props: {
   }
 
   const href = (activity: Activity, scenario?: string) => sessionHref({ activity, scenario, minutes, mode });
-  const unlocked = props.scenarios.filter((s) => s.unlocked);
-  const later = props.scenarios.filter((s) => !s.unlocked);
 
   return (
     <main className="zellige flex flex-1 flex-col px-4 pb-10 pt-[max(1.25rem,env(safe-area-inset-top))]">
@@ -85,7 +84,7 @@ export function PracticeHub(props: {
                 role="radio"
                 aria-checked={minutes === value}
                 onClick={() => rememberMinutes(value)}
-                className={`min-h-11 rounded-2xl py-2.5 text-sm font-medium transition active:scale-95 ${
+                className={`min-h-11 rounded-2xl py-2.5 text-sm font-medium transition motion-safe:active:scale-95 ${
                   minutes === value ? "bg-ink text-bg" : "bg-bg-deep text-ink"
                 }`}
               >
@@ -100,7 +99,7 @@ export function PracticeHub(props: {
                 role="radio"
                 aria-checked={mode === option.value}
                 onClick={() => setMode(option.value)}
-                className={`flex min-h-11 flex-col items-center rounded-2xl border px-2 py-2 transition active:scale-95 ${
+                className={`flex min-h-11 flex-col items-center rounded-2xl border px-2 py-2 transition motion-safe:active:scale-95 ${
                   mode === option.value ? "border-terra bg-terra-soft" : "border-line bg-card"
                 }`}
               >
@@ -168,11 +167,11 @@ export function PracticeHub(props: {
           </p>
 
           <ul className="mt-3 grid grid-cols-2 gap-2">
-            {unlocked.map((scenario) => (
+            {props.scenarios.map((scenario) => (
               <li key={scenario.id}>
                 <Link
                   href={href("roleplay", scenario.id)}
-                  className="flex h-full min-h-24 flex-col rounded-2xl bg-bg-deep p-3 transition active:scale-[0.97]"
+                  className="flex h-full min-h-24 flex-col rounded-2xl bg-bg-deep p-3 transition motion-safe:active:scale-[0.97]"
                 >
                   <span aria-hidden className="text-2xl">
                     {scenario.emoji}
@@ -181,38 +180,34 @@ export function PracticeHub(props: {
                   <span className="ar mt-0.5 text-xs text-ink-soft" dir="rtl">
                     {scenario.titleAr}
                   </span>
+                  {scenario.harder && (
+                    <span className="mt-auto self-start pt-1.5">
+                      <span className="inline-flex flex-wrap items-center gap-x-1.5 rounded-xl bg-saffron-soft px-2 py-0.5 text-[10px] font-medium leading-snug text-ink">
+                        <span className="whitespace-nowrap">a bit harder</span>
+                        <span className="ar whitespace-nowrap" dir="rtl">
+                          شوية صعيبة
+                        </span>
+                      </span>
+                    </span>
+                  )}
                 </Link>
               </li>
             ))}
           </ul>
-
-          {later.length > 0 && (
-            <>
-              <p className="mt-4 text-xs uppercase tracking-wider text-ink-soft">Coming on your journey</p>
-              <ul className="mt-2 grid grid-cols-2 gap-2">
-                {later.map((scenario) => (
-                  <li
-                    key={scenario.id}
-                    className="flex min-h-20 flex-col rounded-2xl border border-dashed border-line p-3 opacity-60"
-                  >
-                    <span aria-hidden className="text-xl grayscale">
-                      {scenario.emoji}
-                    </span>
-                    <span className="mt-1 text-sm font-medium leading-tight">{scenario.title}</span>
-                    <span className="mt-0.5 text-[11px] text-ink-soft">🔒 Opens by month {scenario.unlocksInMonth}</span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
         </section>
 
         <section aria-label="More ways to practice" className="space-y-3 animate-rise [animation-delay:160ms]">
           <SectionTitle en="Quick drills & more" ar="تمارين صغار" />
           <div className="grid grid-cols-2 gap-3">
-            <Tile href="/drill/shadow" emoji="🦜" title="Shadow Me" ar="عاودي ورا حسام" hint="Copy his rhythm, phrase by phrase." />
             <Tile
-              href="/drill/review"
+              href={drillHref("shadow", { mode })}
+              emoji="🦜"
+              title="Shadow Me"
+              ar="عاودي ورا حسام"
+              hint="Copy his rhythm, phrase by phrase."
+            />
+            <Tile
+              href={drillHref("review", { mode, set: props.dueWords > 0 ? "due" : "newest" })}
               emoji="🔁"
               title="Say It Back"
               ar="عاودي الكلمات"
@@ -274,7 +269,7 @@ function Tile(props: {
           {props.emoji}
         </span>
         {props.badge && (
-          <span className="rounded-full bg-terra px-2 py-0.5 text-xs font-semibold text-white tabular-nums">{props.badge}</span>
+          <span className="rounded-full bg-terra px-2 py-0.5 text-xs font-semibold text-on-accent tabular-nums">{props.badge}</span>
         )}
       </span>
       <span className={`mt-3 block font-medium ${props.big ? "font-display text-xl" : ""}`}>{props.title}</span>
@@ -294,7 +289,7 @@ function Tile(props: {
     );
   }
   return (
-    <Link href={props.href} className={`${shape} transition active:scale-[0.98]`}>
+    <Link href={props.href} className={`${shape} transition motion-safe:active:scale-[0.98]`}>
       {body}
     </Link>
   );

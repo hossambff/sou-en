@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { getMember, getUser } from "@/lib/session";
-import { loadClip } from "@/lib/audio-store";
+import { loadClipFor } from "@/lib/audio-store";
 
 /**
- * Play a family recording. Private: only signed-in family members.
+ * Play a family recording. Check-ups: only Sou. Cheers: the sender and Sou.
  * Supports Range requests — iOS Safari won't play <audio> sources without them.
  */
 export async function GET(request: Request, { params }: RouteContext<"/api/audio/[id]">) {
@@ -12,14 +12,14 @@ export async function GET(request: Request, { params }: RouteContext<"/api/audio
   const { id } = await params;
   if (!z.string().uuid().safeParse(id).success) return new Response("Not found", { status: 404 });
 
-  const clip = await loadClip(id);
+  const clip = await loadClipFor(id, user.id);
   if (!clip) return new Response("Not found", { status: 404 });
 
   const data = new Uint8Array(clip.data);
   const headers = {
     "content-type": clip.mime,
     "accept-ranges": "bytes",
-    "cache-control": "private, max-age=31536000, immutable",
+    "cache-control": "private, max-age=3600",
   };
 
   const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get("range") ?? "");

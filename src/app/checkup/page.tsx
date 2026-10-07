@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { requireLearner } from "@/lib/session";
 import { getCheckupSummary, getProfile } from "@/lib/learner";
 import { learnerUsesServerVoice } from "@/lib/tts";
+import { learnerSpeechRate } from "@/app/drill/voice-prefs";
 import { CheckupClient } from "./checkup-client";
 
 export const metadata = { title: "Monthly check-up · Sou Coach" };
@@ -21,6 +22,7 @@ export default async function CheckupPage() {
       lastCefr={summary.list.findLast((c) => c.status === "ready")?.cefr ?? null}
       serverVoice={await learnerUsesServerVoice(user.id)}
       serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
+      speechRate={await learnerSpeechRate(user.id)}
     />
   );
 }

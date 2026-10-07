@@ -18,6 +18,16 @@ async function main() {
     await pool.query(await readFile(new URL(file, dir), "utf8"));
     console.log(`Applied ${file} ✓`);
   }
+  // One learner per family: when LEARNER_EMAIL is set, everyone else is a cheerleader
+  const learnerEmail = process.env.LEARNER_EMAIL?.trim();
+  if (learnerEmail) {
+    const { rowCount } = await pool.query(
+      `update app_member m set role = 'partner' from "user" u
+        where u.id = m.user_id and m.role = 'learner' and lower(u.email) <> lower($1)`,
+      [learnerEmail],
+    );
+    if (rowCount) console.log(`Moved ${rowCount} non-learner account(s) to the Cheer Squad`);
+  }
   await pool.end();
 }
 

@@ -25,7 +25,7 @@ export function RetryButton({ id }: { id: string }) {
       <button
         onClick={retry}
         disabled={state === "busy"}
-        className="w-full rounded-2xl bg-terra py-3.5 font-medium text-white shadow-card active:scale-[0.98] disabled:opacity-70"
+        className="w-full rounded-2xl bg-terra py-3.5 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98] disabled:opacity-70"
       >
         {state === "busy" ? "Hossam is listening…" : "Ask Hossam to listen now"}
       </button>

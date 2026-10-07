@@ -65,12 +65,13 @@ export async function streamSpeech(text: string, options: VoiceOptions = {}) {
   return response?.body ?? null;
 }
 
-/** Full MP3 for a reusable phrase, served from cache when possible. */
-export async function cachedSpeech(text: string, options: VoiceOptions = {}) {
+/** Full MP3 for a reusable phrase, served from cache when possible. `allowNetwork: false` = cache only. */
+export async function cachedSpeech(text: string, options: VoiceOptions = {}, { allowNetwork = true } = {}) {
   const { voiceId, speed } = resolve(options);
   const key = createHash("sha256").update(`${DEFAULT_MODEL}|${voiceId}|${speed}|${text}`).digest("hex");
   const hit = await queryOne<{ data: Buffer }>(`select data from tts_cache where key = $1`, [key]);
   if (hit) return new Uint8Array(hit.data);
+  if (!allowNetwork) return null;
 
   const response = await requestSpeech(text, options, false);
   if (!response) return null;

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireLearner } from "@/lib/session";
 import { query } from "@/lib/db";
-import { APP_TIMEZONE, getProfile } from "@/lib/learner";
+import { getProfile, profileTimeZone } from "@/lib/learner";
 import { shortDate } from "@/lib/progress";
 import { NewStory } from "./new-story";
 
@@ -17,7 +17,7 @@ export default async function StoryPage() {
   const stories = await query<{ id: string; title: string; day: string; first: string | null }>(
     `select id, title, (created_at at time zone $2)::date::text as day, body->'sentences'->0->>'en' as first
        from story where user_id = $1 order by created_at desc limit 30`,
-    [user.id, APP_TIMEZONE],
+    [user.id, profileTimeZone(profile)],
   );
 
   return (
@@ -57,7 +57,7 @@ export default async function StoryPage() {
                 <li key={story.id}>
                   <Link
                     href={`/story/${story.id}`}
-                    className="flex min-h-16 items-center gap-3 rounded-2xl border border-line bg-card p-3 transition active:scale-[0.99]"
+                    className="flex min-h-16 items-center gap-3 rounded-2xl border border-line bg-card p-3 transition motion-safe:active:scale-[0.99]"
                   >
                     <span aria-hidden className="grid size-11 shrink-0 place-items-center rounded-2xl bg-bg-deep text-xl">
                       📖

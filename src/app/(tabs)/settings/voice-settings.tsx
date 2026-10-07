@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CoachVoice } from "@/app/api/voices/voice-list";
 import { BROWSER_VOICE_ID, snapSpeed } from "@/app/api/voices/voice-list";
 import { saveSettings } from "./save";
@@ -38,23 +38,36 @@ export function VoiceSettings({ initialVoiceId, initialSpeed }: Props) {
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const speedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mounted = useRef(true);
 
-  useEffect(() => {
-    let cancelled = false;
+  /** Fetch the voice list. Also the "Try again" button: the home-screen app has no pull-to-refresh. */
+  const loadVoices = useCallback(() => {
     fetch("/api/voices")
       .then((response) => (response.ok ? (response.json() as Promise<VoicesResponse>) : Promise.reject(response.status)))
       .then((body) => {
-        if (!cancelled) setData(body);
+        if (!mounted.current) return;
+        setData(body);
+        setLoadError(false);
       })
       .catch(() => {
-        if (!cancelled) setLoadError(true);
+        if (mounted.current) setLoadError(true);
       });
+  }, []);
+
+  function retryVoices() {
+    setLoadError(false);
+    loadVoices();
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    loadVoices();
     return () => {
-      cancelled = true;
+      mounted.current = false;
       audioRef.current?.pause();
       if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
     };
-  }, []);
+  }, [loadVoices]);
 
   // The effective choice: no saved voice means the deployment default
   const effective = selected ?? data?.defaultVoiceId ?? null;
@@ -139,7 +152,17 @@ export function VoiceSettings({ initialVoiceId, initialSpeed }: Props) {
 
       <div role="radiogroup" aria-label="Coach voice" className="mt-3 space-y-2">
         {!data && !loadError && <p className="py-6 text-center text-sm text-ink-soft">Finding voices…</p>}
-        {loadError && <p className="rounded-xl bg-terra-soft px-3 py-2 text-sm text-terra-deep">Couldn&apos;t load voices. Pull to refresh?</p>}
+        {loadError && (
+          <div role="alert" className="flex items-center justify-between gap-3 rounded-xl bg-terra-soft px-3 py-2 text-sm text-terra-deep">
+            <span>Couldn&apos;t load the voices.</span>
+            <button
+              onClick={retryVoices}
+              className="min-h-11 shrink-0 rounded-full bg-card px-4 font-medium text-terra shadow-card transition active:scale-95"
+            >
+              Try again <bdi className="ar text-xs">· عاودي</bdi>
+            </button>
+          </div>
+        )}
         {data && !data.serverVoice && (
           <p className="rounded-xl bg-saffron-soft px-3 py-2 text-xs">The studio voice isn&apos;t set up yet, so Hossam uses the phone voice.</p>
         )}
@@ -242,7 +265,7 @@ function VoiceRow({
       <button
         onClick={() => onPreview(voice.id)}
         aria-label={playing ? `Stop ${voice.name}` : `Hear ${voice.name}`}
-        className={`grid size-11 shrink-0 place-items-center rounded-full text-sm transition active:scale-95 ${playing ? "bg-terra text-white" : "bg-bg-deep text-terra"}`}
+        className={`grid size-11 shrink-0 place-items-center rounded-full text-sm transition active:scale-95 ${playing ? "bg-terra text-on-accent" : "bg-bg-deep text-terra"}`}
       >
         {playing ? "■" : "▶︎"}
       </button>

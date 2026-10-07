@@ -23,7 +23,7 @@ export default async function ResetPasswordPage({ searchParams }: PageProps<"/re
             <p className="rounded-2xl bg-terra-soft px-4 py-3 text-sm text-terra-deep">
               This link has expired or was already used. Ask for a fresh one, it only takes a second.
             </p>
-            <Link href="/login" className="block w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98]">
+            <Link href="/login" className="block w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98]">
               Back to sign in
             </Link>
           </div>

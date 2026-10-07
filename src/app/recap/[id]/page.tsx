@@ -4,6 +4,8 @@ import { requireLearner } from "@/lib/session";
 import { query, queryOne } from "@/lib/db";
 import { MoodPicker } from "./mood-picker";
 import { SpeakButton } from "@/components/speak-button";
+import { NightTheme } from "@/components/night-theme";
+import { sessionHref } from "@/lib/scenarios";
 
 type GoldenFix = { said: string; better: string; tip: string };
 
@@ -18,8 +20,9 @@ export default async function RecapPage({ params }: PageProps<"/recap/[id]">) {
     mood: "tired" | "ok" | "great" | null;
     started_at: Date;
     ended_at: Date | null;
+    mode: "normal" | "whisper" | "night";
   }>(
-    `select speaking_seconds, points, golden_fixes, mood, started_at, ended_at
+    `select speaking_seconds, points, golden_fixes, mood, started_at, ended_at, mode
        from coach_session where id = $1 and user_id = $2`,
     [id, user.id],
   );
@@ -37,6 +40,7 @@ export default async function RecapPage({ params }: PageProps<"/recap/[id]">) {
 
   return (
     <main className="zellige flex flex-1 flex-col px-4 pb-10 pt-[max(1.5rem,env(safe-area-inset-top))]">
+      <NightTheme active={session.mode === "night"} />
       <div className="mx-auto w-full max-w-md space-y-4">
         <header className="pt-4 text-center animate-rise">
           <p className="text-5xl">🎉</p>
@@ -105,7 +109,7 @@ export default async function RecapPage({ params }: PageProps<"/recap/[id]">) {
         <div className="grid grid-cols-2 gap-3">
           {session.golden_fixes.length > 0 ? (
             <Link
-              href="/session?activity=fixes&minutes=3"
+              href={sessionHref({ activity: "fixes", minutes: 3, mode: session.mode })}
               className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card active:scale-[0.98]"
             >
               ✨ Practice fixes
@@ -120,7 +124,7 @@ export default async function RecapPage({ params }: PageProps<"/recap/[id]">) {
           )}
           <Link
             href="/"
-            className="rounded-2xl bg-terra py-4 text-center font-medium text-white shadow-card active:scale-[0.98]"
+            className="rounded-2xl bg-terra py-4 text-center font-medium text-on-accent shadow-card active:scale-[0.98]"
           >
             Back home
           </Link>

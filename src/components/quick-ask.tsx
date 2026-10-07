@@ -1,20 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Speaker } from "@/lib/voice/speaker";
 import { Listener } from "@/lib/voice/listener";
 import type { QuickAnswer } from "@/app/api/translate/answer";
+import { MIC_NOTICE, listenNotice, type Notice } from "@/app/drill/listen-notice";
+
+/** Query parameter that opens the sheet on arrival (home-screen shortcut: /practice?ask=1). */
+export const ASK_PARAM = "ask";
 
 /**
  * "How do I say…?" — Sou says (or types) something in Darija, French, Arabic or English
  * and Hossam gives her the natural spoken English, ready to hear and plant in her garden.
+ * Opens by itself when the page URL has ?ask=1 (the "How do I say…?" app shortcut).
  */
-export function QuickAsk() {
+export function QuickAsk({ openOnMount = false }: { openOnMount?: boolean }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const planted = useRef(false);
+  const trigger = useRef<HTMLButtonElement>(null);
   const close = useCallback(() => {
     setOpen(false);
     // Show the new word in the garden / counts on the page behind
@@ -24,12 +30,19 @@ export function QuickAsk() {
   const onPlanted = useCallback(() => {
     planted.current = true;
   }, []);
+  const openSheet = useCallback(() => setOpen(true), []);
   return (
     <>
+      {/* useSearchParams lives in its own Suspense boundary so it never holds back the page */}
+      <Suspense fallback={null}>
+        <OpenOnArrival force={openOnMount} onOpen={openSheet} />
+      </Suspense>
       <button
+        ref={trigger}
         type="button"
         onClick={() => setOpen(true)}
-        className="flex min-h-12 w-full items-center justify-center gap-2 rounded-full border border-line bg-card px-5 py-3 text-[15px] font-medium shadow-card transition active:scale-[0.98]"
+        aria-haspopup="dialog"
+        className="flex min-h-12 w-full items-center justify-center gap-2 rounded-full border border-line bg-card px-5 py-3 text-[15px] font-medium shadow-card transition motion-safe:active:scale-[0.98]"
       >
         <span aria-hidden>🗣️</span>
         How do I say…?
@@ -37,9 +50,47 @@ export function QuickAsk() {
           · كيفاش نقول…؟
         </span>
       </button>
-      {open && createPortal(<QuickAskSheet onClose={close} onPlanted={onPlanted} />, document.body)}
+      {open && createPortal(<QuickAskSheet onClose={close} onPlanted={onPlanted} returnFocus={trigger} />, document.body)}
     </>
   );
+}
+
+/** Opens the sheet once on arrival when `force` is set or the URL has ?ask=1, then drops the param. */
+function OpenOnArrival({ force, onOpen }: { force: boolean; onOpen: () => void }) {
+  const asked = useSearchParams().get(ASK_PARAM) === "1";
+  const done = useRef(false);
+  useEffect(() => {
+    if (done.current || !(force || asked)) return;
+    done.current = true;
+    onOpen();
+    if (asked) {
+      // So a refresh or Back doesn't pop the sheet open again
+      const url = new URL(window.location.href);
+      url.searchParams.delete(ASK_PARAM);
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+  }, [force, asked, onOpen]);
+  return null;
+}
+
+const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Keeps Tab / Shift+Tab inside the sheet. */
+function trapTab(event: ReactKeyboardEvent<HTMLElement>) {
+  if (event.key !== "Tab") return;
+  const root = event.currentTarget;
+  const items = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.getClientRects().length > 0);
+  if (items.length === 0) return event.preventDefault();
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || active === root || !root.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !root.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 type Status = "idle" | "listening" | "hearing" | "transcribing" | "thinking" | "answer" | "error";
@@ -53,6 +104,8 @@ const LANGS: { value: BrowserLang; label: string }[] = [
 ];
 
 const MAX_CHARS = 300;
+const NOT_CAUGHT: Notice = { en: "I didn't catch that. Try again, or type it below.", ar: "ما سمعتكش. عاودي، ولا كتبيها لتحت." };
+const OR_TYPE: Notice = { en: "You can also type it below.", ar: "ولا كتبيها لتحت." };
 const OFFLINE = { en: "Hossam can't look this up right now. Try again in a little while 💛", ar: "حسام ما يقدرش يجاوب دابا. عاودي من بعد شوية 💛" };
 
 function hasBrowserRecognition() {
@@ -64,13 +117,23 @@ function asTerm(english: string) {
   return english.replace(/[.!…\s]+$/u, "").trim();
 }
 
-function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted: () => void }) {
+function QuickAskSheet({
+  onClose,
+  onPlanted,
+  returnFocus,
+}: {
+  onClose: () => void;
+  onPlanted: () => void;
+  returnFocus: RefObject<HTMLButtonElement | null>;
+}) {
   const [status, setStatus] = useState<Status>("idle");
   const [text, setText] = useState("");
   const [asked, setAsked] = useState("");
   const [answer, setAnswer] = useState<QuickAnswer | null>(null);
   const [error, setError] = useState<{ en: string; ar: string } | null>(null);
-  const [hint, setHint] = useState<string | null>(null);
+  const [hint, setHint] = useState<Notice | null>(null);
+  /** The server couldn't transcribe, so the phone listens now: let her pick its language */
+  const [phoneStt, setPhoneStt] = useState(false);
   const [saved, setSaved] = useState<Saved>("no");
   const [level, setLevel] = useState(0);
   const [serverStt, setServerStt] = useState(false);
@@ -80,6 +143,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
   const speaker = useRef<Speaker | null>(null);
   const listener = useRef<{ instance: Listener; server: boolean } | null>(null);
   const turn = useRef(0);
+  const sheet = useRef<HTMLDivElement>(null);
 
   // Does the server transcribe audio (Darija + French + English mixed)? Otherwise use the phone's recognizer.
   useEffect(() => {
@@ -94,6 +158,26 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
       alive = false;
     };
   }, []);
+
+  // Modal focus: move focus into the sheet, make the page behind inert (VoiceOver / Tab can't reach it),
+  // and give focus back to the "How do I say…?" button when it closes
+  useEffect(() => {
+    const dialog = sheet.current;
+    if (!dialog) return;
+    const previous = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    const portal = dialog.closest("body > *");
+    const behind = Array.from(document.body.children).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement && el !== portal && !el.hasAttribute("inert"),
+    );
+    behind.forEach((el) => el.setAttribute("inert", ""));
+    dialog.focus({ preventScroll: true });
+    const back = returnFocus;
+    return () => {
+      behind.forEach((el) => el.removeAttribute("inert"));
+      const target = previous?.isConnected ? previous : back.current;
+      target?.focus({ preventScroll: true });
+    };
+  }, [returnFocus]);
 
   // Close on Escape
   useEffect(() => {
@@ -151,12 +235,12 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
     try {
       await mic.init();
     } catch {
-      setHint("I need the microphone to hear you. You can also type it below 🎙️");
+      setHint({ en: `${MIC_NOTICE.en} ${OR_TYPE.en}`, ar: `${MIC_NOTICE.ar} ${OR_TYPE.ar}` });
       return;
     }
     const myTurn = ++turn.current;
     setStatus("listening");
-    const utterance = await mic.listen({
+    const heard = await mic.hear({
       whisper: false,
       browserLang: lang,
       noSpeechTimeoutMs: 15_000,
@@ -166,13 +250,16 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
       },
     });
     if (myTurn !== turn.current) return;
-    if (!utterance) {
+    if (heard.kind !== "heard") {
+      if (heard.kind === "failed" && heard.switchedToPhone) setPhoneStt(true);
+      const notice = listenNotice(heard);
       setStatus("idle");
-      setHint("I didn't catch that. Try again, or type it below.");
+      // Never a silent reset: say what happened, and that typing always works
+      setHint(notice ? { en: `${notice.en} ${OR_TYPE.en}`, ar: `${notice.ar} ${OR_TYPE.ar}` } : NOT_CAUGHT);
       return;
     }
-    setText(utterance.text.slice(0, MAX_CHARS));
-    void ask(utterance.text);
+    setText(heard.text.slice(0, MAX_CHARS));
+    void ask(heard.text);
   }
 
   async function ask(raw: string) {
@@ -244,12 +331,21 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center">
-      <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" />
+      <button
+        type="button"
+        aria-hidden="true"
+        tabIndex={-1}
+        onClick={onClose}
+        className="absolute inset-0 bg-black/45 backdrop-blur-[2px]"
+      />
       <div
+        ref={sheet}
         role="dialog"
         aria-modal="true"
         aria-labelledby="quick-ask-title"
-        className="relative max-h-[92dvh] w-full max-w-md overflow-y-auto rounded-t-[2rem] border border-line bg-bg px-5 pt-3 text-ink shadow-card animate-rise"
+        tabIndex={-1}
+        onKeyDown={trapTab}
+        className="relative max-h-[92dvh] w-full max-w-md overflow-y-auto rounded-t-[2rem] border border-line bg-bg px-5 pt-3 text-ink shadow-card outline-none animate-rise"
         style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom))" }}
       >
         <div className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-line" aria-hidden />
@@ -266,7 +362,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="grid size-11 shrink-0 place-items-center rounded-full bg-card text-xl text-ink-soft shadow-card active:scale-95"
+            className="grid size-11 shrink-0 place-items-center rounded-full bg-card text-xl text-ink-soft shadow-card motion-safe:active:scale-95"
           >
             ×
           </button>
@@ -283,14 +379,14 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
                 <button
                   type="button"
                   onClick={() => play(answer.english)}
-                  className="flex min-h-11 items-center gap-1.5 rounded-full bg-mint-soft px-4 text-sm font-medium text-mint active:scale-95"
+                  className="flex min-h-11 items-center gap-1.5 rounded-full bg-mint-soft px-4 text-sm font-medium text-mint motion-safe:active:scale-95"
                 >
                   🔊 Hear it
                 </button>
                 <button
                   type="button"
                   onClick={() => play(answer.english, true)}
-                  className="flex min-h-11 items-center gap-1.5 rounded-full bg-bg-deep px-4 text-sm font-medium active:scale-95"
+                  className="flex min-h-11 items-center gap-1.5 rounded-full bg-bg-deep px-4 text-sm font-medium motion-safe:active:scale-95"
                 >
                   🐢 Slowly
                 </button>
@@ -331,7 +427,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
               <button
                 type="button"
                 onClick={() => play(answer.example)}
-                className="flex w-full items-center justify-between gap-3 rounded-3xl border border-line bg-card p-4 text-left shadow-card active:scale-[0.99]"
+                className="flex w-full items-center justify-between gap-3 rounded-3xl border border-line bg-card p-4 text-left shadow-card motion-safe:active:scale-[0.99]"
               >
                 <span className="text-[15px] italic">“{answer.example}”</span>
                 <span className="text-mint" aria-hidden>
@@ -350,7 +446,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
                   type="button"
                   onClick={save}
                   disabled={!canSave || saved === "saving"}
-                  className="rounded-2xl bg-mint py-4 font-medium text-white shadow-card active:scale-[0.98] disabled:opacity-60"
+                  className="rounded-2xl bg-mint py-4 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98] disabled:opacity-60"
                 >
                   {saved === "saving" ? "Planting…" : saved === "failed" ? "Try saving again" : "🌱 Save to my garden"}
                 </button>
@@ -358,7 +454,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
               <button
                 type="button"
                 onClick={askAnother}
-                className="rounded-2xl border border-line bg-card px-4 py-4 text-sm font-medium shadow-card active:scale-[0.98]"
+                className="rounded-2xl border border-line bg-card px-4 py-4 text-sm font-medium shadow-card motion-safe:active:scale-[0.98]"
               >
                 Ask another
               </button>
@@ -387,7 +483,11 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
                     {status === "thinking" || status === "transcribing" ? (
                       <span className="flex gap-1.5">
                         {[0, 150, 300].map((delay) => (
-                          <span key={delay} className="size-2.5 animate-bounce rounded-full bg-white" style={{ animationDelay: `${delay}ms` }} />
+                          <span
+                            key={delay}
+                            className="size-2.5 animate-bounce rounded-full bg-white motion-reduce:animate-none"
+                            style={{ animationDelay: `${delay}ms` }}
+                          />
                         ))}
                       </span>
                     ) : (
@@ -409,7 +509,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
                           ? "Hossam is thinking…"
                           : "Tap and say it"}
                 </p>
-                {!serverStt && (
+                {(!serverStt || phoneStt) && (
                   <div className="mt-2 flex items-center gap-1.5 text-xs text-ink-soft" role="radiogroup" aria-label="I'm speaking">
                     {LANGS.map((option) => (
                       <button
@@ -418,7 +518,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
                         role="radio"
                         aria-checked={lang === option.value}
                         onClick={() => setLang(option.value)}
-                        className={`min-h-9 rounded-full px-3 ${lang === option.value ? "bg-ink text-bg" : "bg-card"}`}
+                        className={`min-h-11 rounded-full px-3 ${lang === option.value ? "bg-ink text-bg" : "bg-card"}`}
                       >
                         {option.label}
                       </button>
@@ -428,7 +528,14 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
               </div>
             )}
 
-            {hint && <p className="mt-3 text-center text-sm text-terra">{hint}</p>}
+            {hint && (
+              <p className="mt-3 text-center text-sm text-terra" role="status">
+                {hint.en}
+                <span className="ar block text-ink-soft" dir="rtl">
+                  {hint.ar}
+                </span>
+              </p>
+            )}
             {status === "error" && error && (
               <div className="mt-3 rounded-2xl bg-saffron-soft p-3 text-center text-sm">
                 <p>{error.en}</p>
@@ -461,7 +568,7 @@ function QuickAskSheet({ onClose, onPlanted }: { onClose: () => void; onPlanted:
               <button
                 type="submit"
                 disabled={!text.trim() || status === "thinking"}
-                className="grid size-12 shrink-0 place-items-center rounded-2xl bg-terra text-white shadow-card active:scale-95 disabled:opacity-50"
+                className="grid size-12 shrink-0 place-items-center rounded-2xl bg-terra text-on-accent shadow-card motion-safe:active:scale-95 disabled:opacity-50"
                 aria-label="Ask Hossam"
               >
                 <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>

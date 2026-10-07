@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Speaker, cleanForSpeech } from "@/lib/voice/speaker";
 import { SpeakButton } from "@/components/speak-button";
+import { useNightTheme } from "@/lib/use-night-theme";
+import { useScreenWake } from "@/lib/screen-wake";
 
 type Sentence = { en: string; ar: string };
 type Word = { term: string; meaning: string };
@@ -10,7 +12,15 @@ type Word = { term: string; meaning: string };
 const PAUSE_BETWEEN_MS = 700;
 
 /** Read-along: Hossam reads slowly and softly; the current sentence lights up. Tap a sentence to hear it again. */
-export function StoryReader(props: { title: string; sentences: Sentence[]; words: Word[]; babyName: string | null; serverVoice: boolean }) {
+export function StoryReader(props: {
+  title: string;
+  sentences: Sentence[];
+  words: Word[];
+  babyName: string | null;
+  serverVoice: boolean;
+  /** Her Settings speed: the phone-voice fallback reads at it too (slow on top, as always for stories) */
+  speechRate: number;
+}) {
   const { sentences, words } = props;
   const [current, setCurrent] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -20,6 +30,10 @@ export function StoryReader(props: { title: string; sentences: Sentence[]; words
   const speaker = useRef<Speaker | null>(null);
   const token = useRef(0);
   const lines = useRef<Array<HTMLButtonElement | null>>([]);
+
+  // Bedtime: the whole document goes dark, and the screen stays on while Hossam reads (hands-free, baby in arms)
+  useNightTheme(true);
+  useScreenWake(playing);
 
   useEffect(
     () => () => {
@@ -35,6 +49,7 @@ export function StoryReader(props: { title: string; sentences: Sentence[]; words
       speaker.current.volume = 0.7; // night-time: soft
       speaker.current.slow = true;
     }
+    speaker.current.rate = props.speechRate;
     speaker.current.unlock();
     return speaker.current;
   }
@@ -55,7 +70,8 @@ export function StoryReader(props: { title: string; sentences: Sentence[]; words
   }
 
   function focusLine(index: number) {
-    lines.current[index]?.scrollIntoView({ block: "center", behavior: "smooth" });
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    lines.current[index]?.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
   }
 
   async function readFrom(start: number) {
@@ -133,14 +149,14 @@ export function StoryReader(props: { title: string; sentences: Sentence[]; words
         <div className="grid grid-cols-[1fr_auto] gap-2">
           <button
             onClick={() => (playing ? stop() : readFrom(current ?? 0))}
-            className="min-h-14 rounded-2xl bg-terra py-3 text-lg font-medium text-white shadow-card active:scale-[0.98]"
+            className="min-h-14 rounded-2xl bg-terra py-3 text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]"
           >
             {playing ? "⏸ Pause" : finished ? "↺ Read it again" : current !== null ? "▶ Keep reading" : "▶ Read it to us"}
           </button>
           <button
             onClick={() => setShowAr((value) => !value)}
             aria-pressed={showAr}
-            className={`min-h-14 rounded-2xl border px-4 text-sm font-medium transition active:scale-95 ${
+            className={`min-h-14 rounded-2xl border px-4 text-sm font-medium transition motion-safe:active:scale-95 ${
               showAr ? "border-terra bg-terra-soft" : "border-line bg-card"
             }`}
           >
@@ -162,8 +178,8 @@ export function StoryReader(props: { title: string; sentences: Sentence[]; words
                 }}
                 onClick={() => readOne(i)}
                 aria-current={active ? "true" : undefined}
-                className={`w-full rounded-2xl px-4 py-3 text-left transition duration-300 ${
-                  active ? "scale-[1.02] bg-terra-soft text-ink shadow-card" : playing ? "opacity-55" : "hover:bg-card"
+                className={`w-full rounded-2xl px-4 py-3 text-left transition duration-300 motion-reduce:transition-none ${
+                  active ? "scale-[1.02] motion-reduce:scale-100 bg-terra-soft text-ink shadow-card" : playing ? "opacity-55" : "hover:bg-card"
                 }`}
               >
                 <span className="block text-2xl leading-relaxed">{sentence.en}</span>
@@ -211,7 +227,7 @@ export function StoryReader(props: { title: string; sentences: Sentence[]; words
           <button
             onClick={saveWords}
             disabled={saved.state === "saving" || saved.state === "done"}
-            className="mt-3 w-full rounded-2xl bg-mint py-3.5 font-medium text-white shadow-card active:scale-[0.98] disabled:opacity-80"
+            className="mt-3 w-full rounded-2xl bg-mint py-3.5 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98] disabled:opacity-80"
           >
             {saved.state === "saving"
               ? "Planting…"

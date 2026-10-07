@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { SpeakButton } from "@/components/speak-button";
+import { drillHref } from "@/lib/scenarios";
+import { hourIn, isNightHour } from "@/lib/time-of-day";
 import { filterGarden, gardenStats, type Filter, type GardenItem } from "./garden";
 
 const FILTERS: { value: Filter; label: string; ar: string }[] = [
@@ -12,8 +14,20 @@ const FILTERS: { value: Filter; label: string; ar: string }[] = [
   { value: "strong", label: "Strong", ar: "قويين" },
 ];
 
+const noSubscribe = () => () => {};
+
+/** Night between 22:00 and 06:00 on her phone (same as Home and Practice): drills open soft and slow. */
+function useDrillMode() {
+  return useSyncExternalStore(
+    noSubscribe,
+    () => (isNightHour(hourIn(new Date())) ? "night" : "normal"),
+    () => "normal" as const,
+  );
+}
+
 /** Stats, filter chips, search and the word list (with tap-to-hear and remove). */
 export function GardenView({ items: allItems }: { items: GardenItem[] }) {
+  const mode = useDrillMode();
   // Track removals (not a copy of the list) so a server refresh with new words still shows up
   const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
   const [filter, setFilter] = useState<Filter>("all");
@@ -53,8 +67,8 @@ export function GardenView({ items: allItems }: { items: GardenItem[] }) {
 
       {stats.due > 0 ? (
         <Link
-          href="/drill/review"
-          className="mt-3 flex items-center justify-between gap-3 rounded-3xl bg-terra px-5 py-4 text-white shadow-card transition active:scale-[0.98] animate-rise [animation-delay:80ms]"
+          href={drillHref("review", { mode })}
+          className="mt-3 flex items-center justify-between gap-3 rounded-3xl bg-terra px-5 py-4 text-on-accent shadow-card transition motion-safe:active:scale-[0.98] animate-rise [animation-delay:80ms]"
         >
           <span>
             <span className="block font-semibold">
@@ -70,8 +84,8 @@ export function GardenView({ items: allItems }: { items: GardenItem[] }) {
         </Link>
       ) : (
         <Link
-          href="/drill/review?set=newest"
-          className="mt-3 flex items-center justify-between gap-3 rounded-3xl border border-line bg-card px-5 py-3.5 shadow-card transition active:scale-[0.98] animate-rise [animation-delay:80ms]"
+          href={drillHref("review", { mode, set: "newest" })}
+          className="mt-3 flex items-center justify-between gap-3 rounded-3xl border border-line bg-card px-5 py-3.5 shadow-card transition motion-safe:active:scale-[0.98] animate-rise [animation-delay:80ms]"
         >
           <span className="text-sm">
             <span className="font-medium">All watered 🌿</span> · practise your newest words out loud
@@ -90,7 +104,7 @@ export function GardenView({ items: allItems }: { items: GardenItem[] }) {
               role="radio"
               aria-checked={filter === option.value}
               onClick={() => setFilter(option.value)}
-              className={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-sm font-medium transition active:scale-95 ${
+              className={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-sm font-medium transition motion-safe:active:scale-95 ${
                 filter === option.value ? "bg-ink text-bg" : "border border-line bg-card text-ink"
               }`}
             >
@@ -148,29 +162,28 @@ export function GardenView({ items: allItems }: { items: GardenItem[] }) {
                 {word.emoji}
               </span>
               <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-1.5 font-medium">
-                  <span className="truncate">{word.term}</span>
-                  {word.isDue && (
-                    <span className="shrink-0 rounded-full bg-saffron-soft px-1.5 py-0.5 text-[10px] font-medium text-ink" title="Needs water">
-                      💧 due
-                    </span>
-                  )}
-                </p>
+                {/* The whole phrase wraps (no "I'm exhaust…"); the due pill sits under it */}
+                <p className="font-medium leading-snug [overflow-wrap:anywhere]">{word.term}</p>
+                {word.isDue && (
+                  <span className="mt-0.5 inline-block rounded-full bg-saffron-soft px-1.5 py-0.5 text-[10px] font-medium text-ink" title="Needs water">
+                    💧 due
+                  </span>
+                )}
                 <p dir="auto" className="ar truncate text-left text-sm text-ink-soft">
                   {word.meaning}
                 </p>
                 {word.example && <p className="truncate text-xs italic text-ink-soft">“{word.example}”</p>}
               </div>
               {confirming === word.id ? (
-                <div className="flex shrink-0 flex-col items-stretch gap-1.5">
+                <div className="flex shrink-0 flex-col items-stretch gap-2.5">
                   <button
                     onClick={() => remove(word.id)}
                     disabled={removing === word.id}
-                    className="min-h-9 rounded-full bg-terra px-3 text-xs font-semibold text-white active:scale-95 disabled:opacity-60"
+                    className="min-h-11 rounded-full bg-terra px-3 text-xs font-semibold text-on-accent motion-safe:active:scale-95 disabled:opacity-60"
                   >
                     {removing === word.id ? "…" : "Remove"}
                   </button>
-                  <button onClick={() => setConfirming(null)} className="min-h-9 rounded-full bg-bg-deep px-3 text-xs font-medium active:scale-95">
+                  <button onClick={() => setConfirming(null)} className="min-h-11 rounded-full bg-bg-deep px-3 text-xs font-medium motion-safe:active:scale-95">
                     Keep
                   </button>
                 </div>
@@ -179,7 +192,7 @@ export function GardenView({ items: allItems }: { items: GardenItem[] }) {
                   <SpeakButton text={word.term} />
                   <button
                     onClick={() => setConfirming(word.id)}
-                    className="grid size-10 shrink-0 place-items-center rounded-full text-ink-soft transition hover:bg-bg-deep active:scale-90"
+                    className="grid size-11 shrink-0 place-items-center rounded-full text-ink-soft transition hover:bg-bg-deep motion-safe:active:scale-90"
                     aria-label={`Remove “${word.term}” from your garden`}
                   >
                     <svg viewBox="0 0 24 24" className="size-[18px]" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -212,7 +225,7 @@ function Stat({
   return (
     <button
       onClick={onTap}
-      className={`flex flex-col items-center rounded-2xl border py-2.5 shadow-card transition active:scale-95 ${
+      className={`flex flex-col items-center rounded-2xl border py-2.5 shadow-card transition motion-safe:active:scale-95 ${
         highlight ? "border-saffron/60 bg-saffron-soft" : "border-line bg-card"
       }`}
     >

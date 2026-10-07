@@ -6,6 +6,7 @@ import { queryOne } from "@/lib/db";
 import { getProfile } from "@/lib/learner";
 import { learnerUsesServerVoice } from "@/lib/tts";
 import type { StoryBody } from "@/app/api/story/route";
+import { learnerSpeechRate } from "@/app/drill/voice-prefs";
 import { StoryReader } from "./story-reader";
 
 export const metadata = { title: "Bedtime story · Sou Coach" };
@@ -37,6 +38,7 @@ export default async function StoryReadPage({ params }: PageProps<"/story/[id]">
           words={story.body.words ?? []}
           babyName={profile?.baby_name ?? null}
           serverVoice={await learnerUsesServerVoice(user.id)}
+          speechRate={await learnerSpeechRate(user.id)}
         />
       </div>
     </main>

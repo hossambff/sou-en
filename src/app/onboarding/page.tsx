@@ -1,16 +1,24 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { requireUser, getMember } from "@/lib/session";
+import { requireUser, getMember, mayBeLearner } from "@/lib/session";
 import { getProfile } from "@/lib/learner";
 import { saveLearner, savePartner } from "./actions";
 
 const REASONS = [
   { value: "work", label: "Work", ar: "الخدمة" },
   { value: "travel", label: "Travel", ar: "السفر" },
-  { value: "my kids' future school", label: "Kids' school", ar: "قراية الولاد" },
+  {
+    value: "my kids' future school",
+    label: "Kids' school",
+    ar: "قراية الولاد",
+  },
   { value: "moving abroad", label: "Moving abroad", ar: "نعيش برا" },
   { value: "confidence", label: "Confidence", ar: "الثقة فراسي" },
-  { value: "talking with people online", label: "Socials", ar: "نهضر مع الناس" },
+  {
+    value: "talking with people online",
+    label: "Socials",
+    ar: "نهضر مع الناس",
+  },
 ];
 
 const field =
@@ -21,10 +29,13 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
   const member = await getMember(user.id);
   const params = await searchParams;
 
-  // Sou is the learner; everyone else on the family list is a cheerleader. Either can switch.
-  const learnerEmail = (process.env.LEARNER_EMAIL ?? "").trim().toLowerCase();
-  const defaultRole = member?.role ?? (learnerEmail && user.email.toLowerCase() !== learnerEmail ? "partner" : "learner");
-  const role = params.as === "partner" || params.as === "learner" ? params.as : defaultRole;
+  // Sou (LEARNER_EMAIL) is the learner; everyone else on the family list is a cheerleader.
+  // Without LEARNER_EMAIL, a first-time user may pick either role.
+  const roleLocked = Boolean(process.env.LEARNER_EMAIL);
+  const defaultRole = member?.role ?? (mayBeLearner(user.email) ? "learner" : "partner");
+  const requested = params.as === "partner" || params.as === "learner" ? params.as : null;
+  const role = roleLocked ? (mayBeLearner(user.email) ? "learner" : "partner") : (requested ?? defaultRole);
+  const canSwitch = !roleLocked && !member;
   if (member && !params.as && !params.edit) redirect(member.role === "partner" ? "/family" : "/");
 
   const profile = role === "learner" ? await getProfile(user.id) : null;
@@ -47,13 +58,24 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
                 <span className="mb-1.5 block text-sm font-medium">
                   What should I call you? <bdi className="ar text-ink-soft">· شنو سميتك؟</bdi>
                 </span>
-                <input name="firstName" required maxLength={60} defaultValue={profile?.first_name ?? member?.first_name ?? user.name ?? ""} className={field} />
+                <input
+                  name="firstName"
+                  required
+                  maxLength={60}
+                  defaultValue={profile?.first_name ?? member?.first_name ?? user.name ?? ""}
+                  className={field}
+                />
               </label>
 
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="mb-1.5 block text-sm font-medium">Baby&apos;s name</span>
-                  <input name="babyName" maxLength={60} defaultValue={profile?.baby_name ?? ""} className={`${field} min-h-[3.4rem]`} />
+                  <input
+                    name="babyName"
+                    maxLength={60}
+                    defaultValue={profile?.baby_name ?? ""}
+                    className={`${field} min-h-[3.4rem]`}
+                  />
                 </label>
                 <label className="block">
                   <span className="mb-1.5 block text-sm font-medium">Born on</span>
@@ -89,33 +111,52 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
                 </div>
               </fieldset>
 
-              <button className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98]">
+              <button className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98]">
                 Yallah, let&apos;s go
               </button>
             </form>
-            <Link href="/onboarding?as=partner" className="mt-6 block text-center text-sm text-ink-soft underline-offset-4 hover:underline">
-              Not Sou? I&apos;m here to cheer her on →
-            </Link>
+            {canSwitch && (
+              <Link
+                href="/onboarding?as=partner"
+                className="mt-6 block text-center text-sm text-ink-soft underline-offset-4 hover:underline"
+              >
+                Not Sou? I&apos;m here to cheer her on →
+              </Link>
+            )}
           </>
         ) : (
           <>
             <p className="text-4xl">📣</p>
-            <h1 className="font-display mt-2 text-3xl font-semibold leading-tight tracking-tight">Welcome to the Cheer Squad</h1>
+            <h1 className="font-display mt-2 text-3xl font-semibold leading-tight tracking-tight">
+              Welcome to the Cheer Squad
+            </h1>
             <p className="mt-2 text-ink-soft">
-              You&apos;ll see Sou&apos;s wins (never her mistakes) and can send voice cheers that Hossam plays before her next session.
+              You&apos;ll see Sou&apos;s wins (never her mistakes) and can send voice cheers that Hossam plays before
+              her next session.
             </p>
             <form action={savePartner} className="mt-8 space-y-6">
               <label className="block">
                 <span className="mb-1.5 block text-sm font-medium">Your first name</span>
-                <input name="firstName" required maxLength={60} defaultValue={member?.first_name ?? user.name ?? ""} className={field} />
+                <input
+                  name="firstName"
+                  required
+                  maxLength={60}
+                  defaultValue={member?.first_name ?? user.name ?? ""}
+                  className={field}
+                />
               </label>
-              <button className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card transition active:scale-[0.98]">
+              <button className="w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card transition active:scale-[0.98]">
                 Join the squad
               </button>
             </form>
-            <Link href="/onboarding?as=learner" className="mt-6 block text-center text-sm text-ink-soft underline-offset-4 hover:underline">
-              I&apos;m Sou, the one learning English →
-            </Link>
+            {canSwitch && (
+              <Link
+                href="/onboarding?as=learner"
+                className="mt-6 block text-center text-sm text-ink-soft underline-offset-4 hover:underline"
+              >
+                I&apos;m Sou, the one learning English →
+              </Link>
+            )}
           </>
         )}
       </div>

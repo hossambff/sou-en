@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useNightTheme } from "@/lib/use-night-theme";
 import { drillTotals, matchesAnswer } from "@/lib/scoring";
 import { SpeakButton } from "@/components/speak-button";
 import { QuickAsk } from "@/components/quick-ask";
@@ -11,6 +12,7 @@ import {
   DrillMain,
   DrillOrb,
   MIC_HELP,
+  NoticeText,
   ProgressDots,
   ScoreRing,
   newRunId,
@@ -19,6 +21,7 @@ import {
   type DrillMode,
   type OrbState,
 } from "../drill-ui";
+import { listenNotice, type Notice } from "../listen-notice";
 
 type Phase =
   | "ready"
@@ -75,9 +78,16 @@ export function ReviewClient(props: {
   mode: DrillMode;
   serverVoice: boolean;
   serverStt: boolean;
+  speechRate: number;
 }) {
   const router = useRouter();
-  const voice = useDrillVoice({ serverVoice: props.serverVoice, serverStt: props.serverStt, mode: props.mode });
+  const voice = useDrillVoice({
+    serverVoice: props.serverVoice,
+    serverStt: props.serverStt,
+    mode: props.mode,
+    speechRate: props.speechRate,
+  });
+  useNightTheme(props.mode === "night");
   const [items, setItems] = useState(props.initialItems);
   const [index, setIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>("ready");
@@ -85,7 +95,7 @@ export function ReviewClient(props: {
   const [results, setResults] = useState<(boolean | null)[]>(() => props.initialItems.map(() => null));
   const [practice, setPractice] = useState<Practice>("none");
   const [level, setLevel] = useState(0);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
 
   const turn = useRef(0);
@@ -106,6 +116,7 @@ export function ReviewClient(props: {
     const myTurn = ++turn.current;
     const item = itemsRef.current[indexRef.current];
     if (!item) return;
+    setNotice(null);
     go("asking");
     await voice.say(item.meaning);
     if (myTurn !== turn.current) return;
@@ -116,8 +127,9 @@ export function ReviewClient(props: {
     const myTurn = ++turn.current;
     const item = itemsRef.current[indexRef.current];
     if (!item) return;
+    setNotice(null);
     go("listening");
-    const utterance = await voice.hear({
+    const heard = await voice.hear({
       browserLang: "en-US",
       noSpeechTimeoutMs: 15_000,
       onLevel: setLevel,
@@ -126,9 +138,13 @@ export function ReviewClient(props: {
       },
     });
     if (myTurn !== turn.current) return;
-    if (!utterance) return go("idle");
-    run.current.speaking += utterance.seconds;
-    record(item, matchesAnswer(item.term, utterance.text).ok, utterance.text);
+    if (heard.kind !== "heard") {
+      // Not heard clearly / can't listen right now: say so, never just reset
+      setNotice(listenNotice(heard, { whisper: props.mode === "whisper" }));
+      return go("idle");
+    }
+    run.current.speaking += heard.seconds;
+    record(item, matchesAnswer(item.term, heard.text).ok, heard.text);
   }
 
   /** Count this word once per round (FSRS), then show the answer and say it. */
@@ -143,6 +159,7 @@ export function ReviewClient(props: {
       setResults((current) => current.map((value, i) => (i === itemIndex ? ok : value)));
     }
     setOutcome({ ok, heard });
+    setNotice(null);
     setPractice("none");
     go("reveal");
     void voice.say(item.display);
@@ -161,12 +178,16 @@ export function ReviewClient(props: {
     const item = itemsRef.current[indexRef.current];
     if (!item) return;
     voice.stopAll();
+    setNotice(null);
     setPractice("listening");
-    const utterance = await voice.hear({ browserLang: "en-US", noSpeechTimeoutMs: 12_000, onLevel: setLevel });
+    const heard = await voice.hear({ browserLang: "en-US", noSpeechTimeoutMs: 12_000, onLevel: setLevel });
     if (myTurn !== turn.current) return;
-    if (!utterance) return setPractice("none");
-    run.current.speaking += utterance.seconds;
-    setPractice(matchesAnswer(item.term, utterance.text).ok ? "ok" : "again");
+    if (heard.kind !== "heard") {
+      setNotice(listenNotice(heard, { whisper: props.mode === "whisper" }));
+      return setPractice("none");
+    }
+    run.current.speaking += heard.seconds;
+    setPractice(matchesAnswer(item.term, heard.text).ok ? "ok" : "again");
   }
 
   async function begin() {
@@ -282,7 +303,7 @@ export function ReviewClient(props: {
     return (
       <DrillMain night={props.mode === "night"}>
         <header className="mx-auto flex w-full max-w-md px-4">
-          <Link href="/words" className="rounded-full px-3 py-2 text-sm text-ink-soft">
+          <Link href="/words" className="flex min-h-11 items-center rounded-full px-3 text-sm text-ink-soft">
             ‹ Garden
           </Link>
         </header>
@@ -305,12 +326,12 @@ export function ReviewClient(props: {
             ) : (
               <Link
                 href={`/drill/review?set=newest${modeQuery}`}
-                className="block rounded-2xl bg-terra py-4 font-medium text-white shadow-card active:scale-[0.98]"
+                className="block rounded-2xl bg-terra py-4 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]"
               >
                 Practise my newest words <span className="ar text-sm opacity-90">· الكلمات الجداد</span>
               </Link>
             )}
-            <Link href="/words" className="block rounded-2xl border border-line bg-card py-4 font-medium shadow-card active:scale-[0.98]">
+            <Link href="/words" className="block rounded-2xl border border-line bg-card py-4 font-medium shadow-card motion-safe:active:scale-[0.98]">
               Back to my garden
             </Link>
           </div>
@@ -369,12 +390,12 @@ export function ReviewClient(props: {
             </ul>
           </section>
 
-          {notice && <p className="text-center text-sm text-terra">{notice}</p>}
+          {notice && <NoticeText notice={notice} className="mx-auto" />}
           <div className="grid grid-cols-2 gap-3 pb-4">
-            <Link href="/words" className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card active:scale-[0.98]">
+            <Link href="/words" className="rounded-2xl border border-line bg-card py-4 text-center font-medium shadow-card motion-safe:active:scale-[0.98]">
               My garden
             </Link>
-            <button onClick={practiceMore} className="rounded-2xl bg-terra py-4 font-medium text-white shadow-card active:scale-[0.98]">
+            <button onClick={practiceMore} className="rounded-2xl bg-terra py-4 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]">
               Practice more <span className="ar text-sm opacity-90">· زيدي</span>
             </button>
           </div>
@@ -385,18 +406,21 @@ export function ReviewClient(props: {
 
   const item = items[index];
   const label = LABEL[phase];
-  const busy = phase === "transcribing" || phase === "loading" || phase === "saving";
+  // Finish / Baby / I don't know stay usable while her answer is being transcribed (a stalled
+  // network mustn't freeze the screen; they bump the turn so a late result is ignored)
+  const busy = phase === "loading" || phase === "saving";
+  const waiting = busy || phase === "transcribing";
   const progress = results.map((ok) => (ok == null ? null : ok ? 100 : 40));
 
   return (
     <DrillMain night={props.mode === "night"}>
       <header className="mx-auto flex w-full max-w-md items-center justify-between gap-2 px-4">
         {phase === "ready" ? (
-          <Link href="/words" className="rounded-full px-3 py-2 text-sm text-ink-soft">
+          <Link href="/words" className="flex min-h-11 items-center rounded-full px-3 text-sm text-ink-soft">
             ‹ Garden
           </Link>
         ) : (
-          <button onClick={finish} disabled={busy} className="rounded-full px-3 py-2 text-sm text-ink-soft">
+          <button onClick={finish} disabled={busy} className="min-h-11 rounded-full px-3 text-sm text-ink-soft">
             Finish
           </button>
         )}
@@ -448,7 +472,7 @@ export function ReviewClient(props: {
               <button
                 onClick={practiceSay}
                 disabled={practice === "listening"}
-                className={`rounded-3xl border py-4 font-medium shadow-card active:scale-[0.98] ${
+                className={`rounded-3xl border py-4 font-medium shadow-card motion-safe:active:scale-[0.98] ${
                   practice === "ok" ? "border-mint bg-mint-soft text-mint" : "border-line bg-card"
                 }`}
               >
@@ -461,10 +485,11 @@ export function ReviewClient(props: {
                       : "🎙️ Say it now · قوليها دابا"}
               </button>
             )}
+            {notice && <NoticeText notice={notice} className="mx-auto" />}
           </div>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center py-4">
-            <DrillOrb state={ORB[phase]} level={level} onTap={onOrbTap} label={label.en} disabled={busy || phase === "paused"} />
+            <DrillOrb state={ORB[phase]} level={level} onTap={onOrbTap} label={label.en} disabled={waiting || phase === "paused"} />
             <p className="mt-4 text-center font-medium" aria-live="polite">
               {label.en}
             </p>
@@ -476,7 +501,7 @@ export function ReviewClient(props: {
                 Hossam says a word in Darija. You say it in English, out loud. Saying it is what makes it grow 🌱
               </p>
             )}
-            {notice && <p className="mt-3 max-w-xs text-center text-sm text-terra">{notice}</p>}
+            {notice && <NoticeText notice={notice} className="mt-3" />}
           </div>
         )}
       </section>
@@ -486,14 +511,14 @@ export function ReviewClient(props: {
           {phase === "reveal" ? (
             <button
               onClick={next}
-              className="w-full rounded-3xl bg-terra py-4 text-lg font-semibold text-white shadow-card active:scale-[0.98]"
+              className="w-full rounded-3xl bg-terra py-4 text-lg font-semibold text-on-accent shadow-card motion-safe:active:scale-[0.98]"
             >
               {index + 1 < items.length ? "Next ›" : "Finish 🎉"}
             </button>
           ) : phase === "paused" ? (
             <button
               onClick={resume}
-              className="w-full rounded-3xl bg-mint py-5 text-lg font-semibold text-white shadow-card active:scale-[0.98]"
+              className="w-full rounded-3xl bg-mint py-5 text-lg font-semibold text-on-accent shadow-card motion-safe:active:scale-[0.98]"
             >
               I&apos;m back <span className="ar font-normal opacity-90">· رجعت</span>
             </button>
@@ -502,14 +527,14 @@ export function ReviewClient(props: {
               <button
                 onClick={babyPause}
                 disabled={busy}
-                className="rounded-3xl bg-saffron py-4 font-semibold text-ink shadow-card active:scale-[0.98]"
+                className="rounded-3xl bg-saffron py-4 font-semibold text-on-saffron shadow-card motion-safe:active:scale-[0.98]"
               >
                 👶 Baby!
               </button>
               <button
                 onClick={() => void askTurn()}
-                disabled={busy}
-                className="rounded-3xl border border-line bg-card px-4 text-xl shadow-card active:scale-[0.98]"
+                disabled={waiting}
+                className="rounded-3xl border border-line bg-card px-4 text-xl shadow-card motion-safe:active:scale-[0.98]"
                 aria-label="Hear it again"
               >
                 🔊
@@ -517,7 +542,7 @@ export function ReviewClient(props: {
               <button
                 onClick={dontKnow}
                 disabled={busy}
-                className="rounded-3xl border border-line bg-card px-2 py-4 text-sm font-medium leading-tight shadow-card active:scale-[0.98]"
+                className="rounded-3xl border border-line bg-card px-2 py-4 text-sm font-medium leading-tight shadow-card motion-safe:active:scale-[0.98]"
               >
                 I don&apos;t know
                 <span className="ar block text-xs font-normal text-ink-soft">ما عرفتش</span>

@@ -32,9 +32,9 @@ export function ClipPlayer({
   const [failed, setFailed] = useState(false);
 
   const toneClass = {
-    terra: "bg-terra text-white",
-    mint: "bg-mint text-white",
-    saffron: "bg-saffron text-ink",
+    terra: "bg-terra text-on-accent",
+    mint: "bg-mint text-on-accent",
+    saffron: "bg-saffron text-on-saffron",
   }[tone];
   const barClass = { terra: "bg-terra", mint: "bg-mint", saffron: "bg-saffron" }[tone];
 
@@ -56,7 +56,7 @@ export function ClipPlayer({
         type="button"
         onClick={toggle}
         aria-label={`${playing ? "Pause" : "Play"} ${label}`}
-        className={`grid size-12 shrink-0 place-items-center rounded-full shadow-card transition active:scale-90 ${toneClass}`}
+        className={`grid size-12 shrink-0 place-items-center rounded-full shadow-card transition motion-safe:active:scale-90 ${toneClass}`}
       >
         {playing ? (
           <svg viewBox="0 0 24 24" className="size-5" fill="currentColor" aria-hidden>

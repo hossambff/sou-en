@@ -34,7 +34,7 @@ export default function manifest(): MetadataRoute.Manifest {
         name: "How do I say…?",
         short_name: "How do I say…?",
         description: "Say it in Darija, get natural English back",
-        url: "/practice",
+        url: "/practice?ask=1",
         icons: [{ src: "/pwa/icon-192.png", sizes: "192x192", type: "image/png" }],
       },
       {

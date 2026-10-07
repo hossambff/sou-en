@@ -102,15 +102,19 @@ export function partnerWinDecision(input: PartnerWinInput) {
 
 type Message = { ar: string; latin: string };
 
-/** Warm, zero-guilt nudges from coach Hossam. Darija in Arabic or Latin letters, like the rest of her app. */
+/**
+ * Warm, zero-guilt nudges from coach Hossam. Darija in Arabic or Latin letters, like the rest of her app.
+ * They only go out on days she hasn't practiced yet, so: never mention absence ("where were you?"),
+ * and never promise something that may not exist (a "new word waiting", a message from someone…).
+ */
 export const REMINDER_MESSAGES: Message[] = [
-  { ar: "3 دقايق؟ عندي ليك واحد l'expression زوينة 😉", latin: "3 dqayq? 3andi lik wa7ed l'expression zwina 😉" },
-  { ar: "فين غبرتي؟ 😄 Just 3 minutes, نهضرو شوية English", latin: "Fin ghbrti? 😄 Just 3 minutes, nhedro chwiya English" },
+  { ar: "3 دقايق؟ نتعلمو واحد l'expression زوينة 😉", latin: "3 dqayq? Nt3allmo wa7ed l'expression zwina 😉" },
+  { ar: "مرحبا 👋 نهضرو شوية English؟ Just 3 minutes, بلا ضغط", latin: "Mer7ba 👋 Nhedro chwiya English? Just 3 minutes, bla dghet" },
   { ar: "قهيوة و 3 دقايق ديال English؟ ☕ I'm ready when you are", latin: "Qhiwa w 3 dqayq dyal English? ☕ I'm ready when you are" },
   { ar: "البيبي ناعس؟ 🤫 Perfect time — نهضرو بشوية", latin: "Lbebe na3es? 🤫 Perfect time — nhedro b chwiya" },
   { ar: "عندي ليك سؤال صغير بالنجليزية… Ready? 🎙️", latin: "3andi lik sou2al sghir b l'anglais… Ready? 🎙️" },
   { ar: "Small steps, big English 🌱 غير 3 دقايق اليوم", latin: "Small steps, big English 🌱 ghir 3 dqayq lyoum" },
-  { ar: "واحد الكلمة جديدة كتسناك فالجردة ديالك 🌸", latin: "Wa7ed lkelma jdida katsennak f jarda dyalek 🌸" },
+  { ar: "كل جملة بالنجليزية كتقربك من الهدف ديالك 🌸 غير 3 دقايق؟", latin: "Kol jomla b l'anglais katqerrbek men lhadaf dyalek 🌸 Ghir 3 dqayq?" },
 ];
 
 export const REMINDER_TITLE = "Hossam 💬";

@@ -3,10 +3,12 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { STORY_THEMES, type StoryThemeId } from "@/lib/progress";
+import { useNightTheme } from "@/lib/use-night-theme";
 
 /** Theme chips + "Write tonight's story" → POST /api/story → the reader. */
 export function NewStory() {
   const router = useRouter();
+  useNightTheme(true); // the whole bedtime-story page is dark, not just <main>
   const [theme, setTheme] = useState<StoryThemeId>("surprise");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export function NewStory() {
             role="radio"
             aria-checked={theme === option.id}
             onClick={() => setTheme(option.id)}
-            className={`min-h-11 rounded-full border px-3.5 py-2 text-sm transition active:scale-95 ${
+            className={`min-h-11 rounded-full border px-3.5 py-2 text-sm transition motion-safe:active:scale-95 ${
               theme === option.id ? "border-terra bg-terra-soft font-medium" : "border-line"
             }`}
           >
@@ -55,7 +57,7 @@ export function NewStory() {
       <button
         onClick={write}
         disabled={busy}
-        className="mt-4 w-full rounded-2xl bg-terra py-4 text-lg font-medium text-white shadow-card active:scale-[0.98] disabled:opacity-70"
+        className="mt-4 w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98] disabled:opacity-70"
       >
         {busy ? "Hossam is writing… ✍️" : "✨ Write tonight's story"}
       </button>

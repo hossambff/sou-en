@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { z } from "zod";
 import { requireLearner } from "@/lib/session";
 import { queryOne } from "@/lib/db";
-import { APP_TIMEZONE } from "@/lib/learner";
+import { learnerTimeZone } from "@/lib/learner";
 import { CEFR_INFO, CHECKUP_PROMPTS, RUBRIC, cefrIndex, isCefrBand, shortDate, type RubricScores } from "@/lib/progress";
 import type { CheckupAnswer, CheckupReport } from "@/app/api/checkup/score";
 import { ClipPlayer } from "../clip-player";
@@ -27,11 +27,12 @@ export default async function CheckupResultPage({ params }: PageProps<"/checkup/
   const { user } = await requireLearner();
   const { id } = await params;
   if (!z.string().uuid().safeParse(id).success) notFound();
+  const timeZone = await learnerTimeZone(user.id);
 
   const checkup = await queryOne<CheckupRow>(
     `select id, created_at::text, (created_at at time zone $3)::date::text as day, month, status, cefr, scores, report, answers
        from checkup where id = $1 and user_id = $2`,
-    [id, user.id, APP_TIMEZONE],
+    [id, user.id, timeZone],
   );
   if (!checkup) notFound();
 
@@ -39,7 +40,7 @@ export default async function CheckupResultPage({ params }: PageProps<"/checkup/
     queryOne<Pick<CheckupRow, "id" | "day" | "answers">>(
       `select id, (created_at at time zone $2)::date::text as day, answers
          from checkup where user_id = $1 order by created_at limit 1`,
-      [user.id, APP_TIMEZONE],
+      [user.id, timeZone],
     ),
     queryOne<Pick<CheckupRow, "cefr" | "scores">>(
       `select cefr, scores from checkup
@@ -269,7 +270,7 @@ export default async function CheckupResultPage({ params }: PageProps<"/checkup/
         )}
 
         <div className="grid gap-2 pt-2">
-          <Link href="/" className="block rounded-2xl bg-terra py-4 text-center text-lg font-medium text-white shadow-card active:scale-[0.98]">
+          <Link href="/" className="block rounded-2xl bg-terra py-4 text-center text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]">
             Back home
           </Link>
           <Link href="/progress" className="block py-3 text-center text-sm font-medium text-ink-soft">

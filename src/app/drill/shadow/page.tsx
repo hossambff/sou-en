@@ -2,6 +2,7 @@ import { requireLearner } from "@/lib/session";
 import { learnerUsesServerVoice } from "@/lib/tts";
 import { shadowRound } from "../drill-data";
 import type { DrillMode } from "../drill-ui";
+import { learnerSpeechRate } from "../voice-prefs";
 import { ShadowClient } from "./shadow-client";
 
 export default async function ShadowPage({ searchParams }: PageProps<"/drill/shadow">) {
@@ -16,6 +17,7 @@ export default async function ShadowPage({ searchParams }: PageProps<"/drill/sha
       mode={mode}
       serverVoice={await learnerUsesServerVoice(user.id)}
       serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
+      speechRate={await learnerSpeechRate(user.id)}
     />
   );
 }
