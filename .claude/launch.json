@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sou-coach",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "export PATH=$HOME/.nvm/versions/node/v22.23.3/bin:$PATH && npm run dev"
+      ],
+      "port": 3000
+    },
+    {
+      "name": "sou-coach-localdb",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "export PATH=$HOME/.nvm/versions/node/v22.23.3/bin:$PATH && DATABASE_URL=postgres://postgres:postgres@localhost:5433/postgres BETTER_AUTH_URL=http://localhost:3001 npm run dev -- --port 3001"
+      ],
+      "port": 3001
+    }
+  ]
+}

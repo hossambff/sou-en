@@ -1,0 +1,175 @@
+@import "tailwindcss";
+
+/* Sou Coach — warm Moroccan palette: cream, terracotta, mint tea, saffron */
+:root {
+  --bg: #fbf5ec;
+  --bg-deep: #f4e8d6;
+  --card: #fffaf3;
+  --ink: #2b1d14;
+  --ink-soft: #6b5545;
+  --line: #e9dac5;
+  --terra: #c8553d;
+  --terra-deep: #a4402c;
+  --terra-soft: #f6dcd2;
+  --mint: #2f8f6b;
+  --mint-soft: #d7eee3;
+  --saffron: #e9a23b;
+  --saffron-soft: #fbe9c8;
+  --shadow: 0 1px 2px rgb(43 29 20 / 0.06), 0 8px 24px -12px rgb(43 29 20 / 0.18);
+  --pattern-opacity: 0.07;
+  color-scheme: light;
+}
+
+.night,
+:root[data-theme="night"] {
+  --bg: #15100d;
+  --bg-deep: #1c1511;
+  --card: #221a15;
+  --ink: #f3e6d4;
+  --ink-soft: #b49d88;
+  --line: #3a2d24;
+  --terra: #e07a5f;
+  --terra-deep: #c8553d;
+  --terra-soft: #3d241c;
+  --mint: #5fbf98;
+  --mint-soft: #1c3329;
+  --saffron: #f0b55a;
+  --saffron-soft: #3b2c15;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.6);
+  --pattern-opacity: 0.04;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15100d;
+    --bg-deep: #1c1511;
+    --card: #221a15;
+    --ink: #f3e6d4;
+    --ink-soft: #b49d88;
+    --line: #3a2d24;
+    --terra: #e07a5f;
+    --terra-deep: #c8553d;
+    --terra-soft: #3d241c;
+    --mint: #5fbf98;
+    --mint-soft: #1c3329;
+    --saffron: #f0b55a;
+    --saffron-soft: #3b2c15;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.6);
+    --pattern-opacity: 0.04;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-deep: var(--bg-deep);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-line: var(--line);
+  --color-terra: var(--terra);
+  --color-terra-deep: var(--terra-deep);
+  --color-terra-soft: var(--terra-soft);
+  --color-mint: var(--mint);
+  --color-mint-soft: var(--mint-soft);
+  --color-saffron: var(--saffron);
+  --color-saffron-soft: var(--saffron-soft);
+  --font-sans: var(--font-readex), system-ui, sans-serif;
+  --font-display: var(--font-fraunces), var(--font-readex), Georgia, serif;
+  --shadow-card: var(--shadow);
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Subtle zellige star pattern */
+.zellige {
+  position: relative;
+  isolation: isolate;
+}
+.zellige::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: var(--pattern-opacity);
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23c8553d' stroke-width='1.4'%3E%3Cpath d='M28 6l6.5 15.5L50 28l-15.5 6.5L28 50l-6.5-15.5L6 28l15.5-6.5z'/%3E%3Crect x='17' y='17' width='22' height='22' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='4'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 56px 56px;
+  pointer-events: none;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+}
+
+[dir="rtl"],
+.ar {
+  font-family: var(--font-readex), system-ui, sans-serif;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+@keyframes ripple {
+  from {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  to {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-breathe {
+  animation: breathe 3.6s ease-in-out infinite;
+}
+.animate-ripple {
+  animation: ripple 1.8s ease-out infinite;
+}
+.animate-spin-slow {
+  animation: spin-slow 14s linear infinite;
+}
+.animate-rise {
+  animation: rise 0.4s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-breathe,
+  .animate-ripple,
+  .animate-spin-slow,
+  .animate-rise {
+    animation: none;
+  }
+}
