@@ -19,6 +19,7 @@ import {
   useDrillVoice,
   type DrillMode,
   type OrbState,
+  useSaveDrillOnLeave,
 } from "../drill-ui";
 import { listenNotice, type Notice } from "../listen-notice";
 
@@ -95,6 +96,7 @@ export function ShadowClient(props: {
   const indexRef = useRef(0);
   const slowRef = useRef(slow);
   const run = useRef<Run>(emptyRun());
+  useSaveDrillOnLeave(run, "shadow", props.mode);
 
   function go(next: Phase) {
     phaseRef.current = next;

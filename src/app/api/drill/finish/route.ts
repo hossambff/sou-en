@@ -1,4 +1,6 @@
+import { after } from "next/server";
 import { z } from "zod";
+import { notifySquadOfWin } from "@/lib/push";
 import { getLearnerUserId } from "@/lib/session";
 import { query, queryOne } from "@/lib/db";
 import { drillTotals } from "@/lib/scoring";
@@ -40,7 +42,10 @@ export async function POST(request: Request) {
      returning points`,
     [runId, userId, mode, elapsed, totals.speakingSeconds, totals.points, kind],
   );
-  if (inserted) return Response.json({ recorded: true, ...totals });
+  if (inserted) {
+    after(() => notifySquadOfWin(new Date(), userId).catch((error) => console.error("Squad notice failed", error)));
+    return Response.json({ recorded: true, ...totals });
+  }
 
   // Already finished (double tap / retry): report what was saved
   const existing = await queryOne<{ points: number; speaking_seconds: number }>(

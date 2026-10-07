@@ -10,11 +10,13 @@ export function SpeakButton({ text }: { text: string }) {
     <button
       onClick={() => {
         speaker.current ??= new Speaker(true, true);
+        // Quieter at night (set before unlock: quiet playback is prepared inside the tap)
+        speaker.current.volume = document.documentElement.dataset.theme === "night" ? 0.6 : 1;
         speaker.current.unlock();
         speaker.current.stop();
         speaker.current.enqueue(text);
       }}
-      className="grid size-10 shrink-0 place-items-center rounded-full bg-mint-soft text-mint transition active:scale-90"
+      className="grid size-11 shrink-0 place-items-center rounded-full bg-mint-soft text-mint transition motion-safe:active:scale-90"
       aria-label={`Hear "${text}"`}
     >
       <svg viewBox="0 0 24 24" className="size-5" fill="currentColor">

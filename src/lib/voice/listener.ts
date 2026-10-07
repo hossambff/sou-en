@@ -33,6 +33,8 @@ export type ListenOptions = {
 };
 
 const MAX_UTTERANCE_MS = 45_000;
+/** After a passing server hiccup (5xx), listen with the phone for this long, then try the server again. */
+const SERVER_STT_BACKOFF_MS = 60_000;
 /** Give up on one transcription request after this long (counts as a network failure). */
 const STT_TIMEOUT_MS = 20_000;
 
@@ -73,11 +75,14 @@ export class Listener {
   /** Bumped by dispose(): a getUserMedia that resolves afterwards is stopped and thrown away. */
   private epoch = 0;
 
+  /** Server transcription is skipped until this time after a transient failure. */
+  private serverSttRetryAt = 0;
+
   constructor(private useServerStt: boolean) {}
 
   /** True while transcription goes through the server (false after falling back to the phone). */
   get usingServerStt() {
-    return this.useServerStt;
+    return this.useServerStt && Date.now() >= this.serverSttRetryAt;
   }
 
   /** Ask for the mic (call from a tap). Concurrent calls share one request; a dead mic is re-acquired. */
@@ -170,11 +175,13 @@ export class Listener {
     }
     // Only one listen at a time: an older one still running ends as silence
     this.cancel();
-    if (!this.useServerStt) return this.listenWithBrowser(options);
+    if (!this.useServerStt || Date.now() < this.serverSttRetryAt) return this.listenWithBrowser(options);
     const result = await this.listenWithServer(options);
     if (result.kind === "failed" && (result.reason === "limit" || result.reason === "service") && browserRecognition()) {
-      // The server can't hear her right now: the phone's own recognition is better than nothing
-      this.useServerStt = false;
+      // The server can't hear her right now: the phone's own recognition is better than nothing.
+      // The daily limit and "not configured" (501) last; any other server error is a passing hiccup.
+      if (result.reason === "limit" || result.status === 501) this.useServerStt = false;
+      else this.serverSttRetryAt = Date.now() + SERVER_STT_BACKOFF_MS;
       return { ...result, switchedToPhone: true };
     }
     return result;

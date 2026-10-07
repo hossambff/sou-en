@@ -13,6 +13,7 @@ import { bumpUsage } from "./usage";
 
 const DEFAULT_MODEL = process.env.ELEVENLABS_TTS_MODEL ?? "eleven_v3";
 const QUOTA_BACKOFF_MS = 60 * 60 * 1000;
+const BUSY_BACKOFF_MS = 10 * 1000;
 let quotaExhaustedUntil = 0;
 
 export type VoiceOptions = { voiceId?: string | null; speed?: number };
@@ -48,9 +49,12 @@ async function requestSpeech(text: string, options: VoiceOptions, stream: boolea
   );
   if (!response.ok || !response.body) {
     const detail = await response.text().catch(() => "");
-    // 401/402/429 with quota details => stop trying for a while
-    if ([401, 402, 429].includes(response.status) || /quota|limit|payment/i.test(detail)) {
+    // Out of monthly characters / plan doesn't allow this voice => stop trying for an hour.
+    // 429 "too many concurrent requests" or a rate limit is momentary => back off for a few seconds only.
+    if (/quota_exceeded|paid_plan_required|payment_required|invalid_api_key/i.test(detail) || [401, 402].includes(response.status)) {
       quotaExhaustedUntil = Date.now() + QUOTA_BACKOFF_MS;
+    } else if (response.status === 429) {
+      quotaExhaustedUntil = Math.max(quotaExhaustedUntil, Date.now() + BUSY_BACKOFF_MS);
     }
     console.error("TTS failed", response.status, detail.slice(0, 300));
     return null;

@@ -102,6 +102,30 @@ export type ScoreOutcome = { status: "ready" } | { status: "pending"; reason: "n
  * fills missing transcripts from the saved recordings first, and does nothing if already scored.
  */
 export async function scoreCheckup(checkupId: string, userId: string): Promise<ScoreOutcome> {
+  // Claim the row: only one scoring run at a time (a claim older than 2 minutes is considered dead)
+  const claimed = await queryOne<{ id: string }>(
+    `update checkup set scoring_started_at = now()
+      where id = $1 and user_id = $2 and status = 'pending'
+        and (scoring_started_at is null or scoring_started_at < now() - interval '2 minutes')
+      returning id`,
+    [checkupId, userId],
+  );
+  if (!claimed) {
+    const current = await queryOne<{ status: string }>(`select status from checkup where id = $1 and user_id = $2`, [
+      checkupId,
+      userId,
+    ]);
+    if (!current) throw new Error("Check-up not found");
+    return current.status === "ready" ? { status: "ready" } : { status: "pending", reason: "unavailable" };
+  }
+  try {
+    return await scoreClaimedCheckup(checkupId, userId);
+  } finally {
+    await query(`update checkup set scoring_started_at = null where id = $1`, [checkupId]).catch(() => {});
+  }
+}
+
+async function scoreClaimedCheckup(checkupId: string, userId: string): Promise<ScoreOutcome> {
   const row = await queryOne<{ status: string; answers: CheckupAnswer[]; created_at: Date }>(
     `select status, answers, created_at from checkup where id = $1 and user_id = $2`,
     [checkupId, userId],

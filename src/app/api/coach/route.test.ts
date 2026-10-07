@@ -315,6 +315,29 @@ describe("POST /api/coach", () => {
     expect(inserted("assistant")).toEqual(["Oh no, that's hard!"]);
   });
 
+  it("with a turn id: a retry of a saved turn isn't saved again, but a repeated 'yes' with a new id is", async () => {
+    const session = { id: SESSION_ID, mode: "normal", minutes_planned: 5, activity: "chat", scenario: null, ended: false };
+    const savedTurns = new Set(["turn-aaaa-1111"]);
+    db.queryOne.mockImplementation(async (sql: string, params?: unknown[]) =>
+      String(sql).includes("client_turn_id") ? (savedTurns.has(String(params?.[1])) ? { "?column?": 1 } : null) : session,
+    );
+    db.query.mockImplementation(async (sql: string) =>
+      sql.includes("from coach_message where session_id")
+        ? [{ role: "user", content: "yes" }, { role: "assistant", content: "Really?" }]
+        : sql.includes("insert into coach_message") && sql.includes("'user'")
+          ? [{ id: 1 }]
+          : [],
+    );
+    llm.claude.mockReturnValue(fakeClaude({ text: "Great!" }).client);
+    await settle(await POST(request({ sessionId: SESSION_ID, text: "yes", speakingSeconds: 1, retry: true, turnId: "turn-aaaa-1111" })));
+    expect(inserted("user")).toEqual([]);
+
+    llm.claude.mockReturnValue(fakeClaude({ text: "Great!" }).client);
+    await settle(await POST(request({ sessionId: SESSION_ID, text: "yes", speakingSeconds: 1, retry: true, turnId: "turn-bbbb-2222" })));
+    expect(inserted("user")).toEqual(["yes"]);
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes("speaking_seconds = speaking_seconds"))).toBe(true);
+  });
+
   it("a first try with the same words as before is still saved", async () => {
     db.query.mockImplementation(async (sql: string) =>
       sql.includes("from coach_message where session_id") ? [{ role: "user", content: "yes" }, { role: "assistant", content: "Really?" }] : [],

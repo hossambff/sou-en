@@ -6,8 +6,11 @@ import { query } from "./db";
  * the baby took over). Same points rule as POST /api/session/[id]/end, so nothing she said is lost.
  */
 
-/** A session with no new message for this long is considered abandoned. */
-export const STALE_SESSION_MINUTES = 30;
+/**
+ * A session with no new message for this long is considered abandoned. Generous on purpose:
+ * a Baby! pause for a feed or a nap must never be closed underneath her.
+ */
+export const STALE_SESSION_MINUTES = 180;
 
 /**
  * Voice points for the coach_session row aliased `cs`, in SQL — the same rule as pointsForSession():

@@ -22,6 +22,8 @@ const body = z.object({
   minutesPlanned: z.number().int().min(1).max(240).optional(),
   /** The same turn again after an error: don't save her words (or count her seconds) twice. */
   retry: z.boolean().default(false),
+  /** The client's id for this turn (reused on retry) — the reliable way to spot an already-saved turn. */
+  turnId: z.string().min(8).max(64).optional(),
 });
 
 const MAX_TOOL_ROUNDS = 4;
@@ -112,7 +114,14 @@ export async function POST(request: Request) {
   );
   // A retry of a turn whose words were already saved: don't save them (or her seconds) again
   const lastUserTurn = [...history].reverse().find((m) => m.role === "user");
-  const alreadySaved = input.retry && lastUserTurn?.content === userTurn;
+  const alreadySaved = input.turnId
+    ? Boolean(
+        await queryOne(`select 1 from coach_message where session_id = $1 and client_turn_id = $2`, [
+          session.id,
+          input.turnId,
+        ]),
+      )
+    : input.retry && lastUserTurn?.content === userTurn;
   const last = history.at(-1);
   if (!(alreadySaved && last?.role === "user" && last.content === userTurn)) history.push({ role: "user", content: userTurn });
   // The API needs the first message to be from the user
@@ -204,8 +213,13 @@ export async function POST(request: Request) {
     try {
       // Saved only once Claude answers, so a retry after a failed start doesn't duplicate her turn
       if (!alreadySaved) {
-        await query(`insert into coach_message (session_id, role, content) values ($1, 'user', $2)`, [session.id, userTurn]);
-        if (input.speakingSeconds > 0) {
+        const inserted = await query(
+          `insert into coach_message (session_id, role, content, client_turn_id) values ($1, 'user', $2, $3)
+           on conflict (session_id, client_turn_id) where client_turn_id is not null do nothing
+           returning id`,
+          [session.id, userTurn, input.turnId ?? null],
+        );
+        if (inserted.length && input.speakingSeconds > 0) {
           await query(`update coach_session set speaking_seconds = speaking_seconds + $2 where id = $1`, [
             session.id,
             Math.round(input.speakingSeconds),

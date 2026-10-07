@@ -56,7 +56,8 @@ describe("POST /api/session/[id]/end", () => {
     });
     const response = await call();
     expect(response.status).toBe(200);
-    expect(order).toEqual(["claim", "recap"]);
+    // claim (ended_at + points) → the recap reads the ended session → the Claude recap
+    expect(order).toEqual(["claim", "other", "recap"]);
     const [sql, params] = claim()!;
     expect(sql).toMatch(/points = case when exists/);
     expect(sql).toMatch(/ended_at is null/);

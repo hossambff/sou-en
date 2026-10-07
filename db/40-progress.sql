@@ -31,3 +31,6 @@ create index if not exists story_user_created on story (user_id, created_at desc
 
 alter table checkup enable row level security;
 alter table story   enable row level security;
+
+-- Scoring claim: a retry while the first scoring call is still running must not score (and pay) twice
+alter table checkup add column if not exists scoring_started_at timestamptz;

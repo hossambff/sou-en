@@ -27,7 +27,14 @@ type Phase =
   | "error";
 
 type Line = { role: "coach" | "sou"; text: string };
-type CoachRequest = { text?: string; event?: "start" | "resume" | "timeUp"; speakingSeconds?: number; cheerFrom?: string };
+type CoachRequest = {
+  text?: string;
+  event?: "start" | "resume" | "timeUp";
+  speakingSeconds?: number;
+  cheerFrom?: string;
+  /** One id per turn, reused on retry, so the server never saves the same turn twice */
+  turnId?: string;
+};
 type Message = {
   en: string;
   ar?: string;
@@ -322,8 +329,9 @@ export function SessionClient(props: {
   }
 
   /** @param retry the same request again after an error (the server then won't save her words twice) */
-  async function coachTurn(request: CoachRequest, retry = false) {
+  async function coachTurn(incoming: CoachRequest, retry = false) {
     const myTurn = ++turn.current;
+    const request = incoming.turnId ? incoming : { ...incoming, turnId: crypto.randomUUID() };
     lastRequest.current = request;
     setProblem(null);
     go("thinking");
@@ -430,13 +438,18 @@ export function SessionClient(props: {
       let heard = false;
       if (audioUrl) {
         let skipped = false;
+        // Skip must work instantly, even while the clip is still downloading on a slow connection
+        const download = new AbortController();
         stopCheer.current = () => {
           skipped = true;
+          download.abort();
           speaker.current?.stop();
         };
-        const clip = await fetch(audioUrl)
+        const giveUp = setTimeout(() => download.abort(), 10_000); // a stalled download never holds Hossam back
+        const clip = await fetch(audioUrl, { signal: download.signal })
           .then((r) => (r.ok ? r.blob() : null))
-          .catch(() => null);
+          .catch(() => null)
+          .finally(() => clearTimeout(giveUp));
         if (clip && !skipped && myStart === turn.current && speaker.current) heard = await speaker.current.playRecording(clip);
         heard ||= skipped;
         stopCheer.current = null;

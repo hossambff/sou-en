@@ -156,6 +156,21 @@ describe("Listener", () => {
     expect(listener.usingServerStt).toBe(false);
   });
 
+  it("a passing server error only borrows the phone for a minute; the daily limit switches for good", async () => {
+    const mic = fakeMic();
+    vi.stubGlobal("webkitSpeechRecognition", class {});
+    const listener = new Listener(true);
+    await speakAndWait(listener, mic, new Response("Speech-to-text failed", { status: 502 }));
+    expect(listener.usingServerStt).toBe(false);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(listener.usingServerStt).toBe(true);
+
+    const limited = new Listener(true);
+    await speakAndWait(limited, mic, new Response("Daily listening limit reached", { status: 429 }));
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(limited.usingServerStt).toBe(false);
+  });
+
   it("without the phone's recognition, it keeps the server and just reports the failure", async () => {
     const mic = fakeMic();
     const listener = new Listener(true);

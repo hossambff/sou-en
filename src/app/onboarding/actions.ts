@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { getMember, mayBeLearner, requireUser } from "@/lib/session";
+import { getLearnerMember, getMember, mayBeLearner, requireUser } from "@/lib/session";
 import { pool } from "@/lib/db";
 
 const learnerSchema = z.object({
@@ -14,8 +14,10 @@ const learnerSchema = z.object({
 
 export async function saveLearner(formData: FormData) {
   const user = await requireUser();
-  // Only Sou (LEARNER_EMAIL) can be the learner
+  // Only Sou (LEARNER_EMAIL) can be the learner — and there is only ever one learner per family
   if (!mayBeLearner(user.email)) redirect("/onboarding?as=partner");
+  const learner = await getLearnerMember();
+  if (learner && learner.user_id !== user.id && !process.env.LEARNER_EMAIL) redirect("/onboarding?as=partner");
   const data = learnerSchema.parse({
     firstName: formData.get("firstName"),
     babyName: formData.get("babyName") || undefined,
@@ -49,9 +51,14 @@ export async function saveLearner(formData: FormData) {
 
 export async function savePartner(formData: FormData) {
   const user = await requireUser();
-  // Never demote the learner (an accidental tap would hide her whole journey)
+  // Never demote the real learner (an accidental tap would hide her whole journey):
+  // Sou's email when LEARNER_EMAIL is set, or a learner who has already practiced.
   const existing = await getMember(user.id);
-  if (existing?.role === "learner" || (process.env.LEARNER_EMAIL && mayBeLearner(user.email))) redirect("/");
+  if (process.env.LEARNER_EMAIL && mayBeLearner(user.email)) redirect("/");
+  if (existing?.role === "learner") {
+    const practiced = await pool.query(`select 1 from coach_session where user_id = $1 limit 1`, [user.id]);
+    if (practiced.rowCount) redirect("/");
+  }
   const firstName = z.string().trim().min(1).max(60).parse(formData.get("firstName"));
   await pool.query(
     `insert into app_member (user_id, role, first_name) values ($1, 'partner', $2)

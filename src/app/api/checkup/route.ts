@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { after } from "next/server";
 import { z } from "zod";
+import { notifySquadOfWin } from "@/lib/push";
 import { getLearnerUserId } from "@/lib/session";
 import { query } from "@/lib/db";
 import { getCheckupSummary, getProfile } from "@/lib/learner";
@@ -42,28 +44,36 @@ export async function POST(request: Request) {
   const profile = await getProfile(userId);
   if (!profile) return new Response("Finish onboarding first", { status: 409 });
 
-  // Only her own check-up recordings can be attached
+  // Only her own check-up recordings can be attached. A recording that no longer exists (or isn't hers)
+  // is dropped from that answer — her transcript still counts — instead of failing the whole check-up.
   const clipIds = parsed.data.answers.map((a) => a.clipId).filter((id): id is string => Boolean(id));
-  if (clipIds.length) {
-    const owned = await query<{ id: string }>(
-      `select id from audio_clip where id = any($1::uuid[]) and user_id = $2 and kind = 'checkup'`,
-      [clipIds, userId],
-    );
-    if (owned.length !== new Set(clipIds).size) return Response.json({ error: "Unknown recording" }, { status: 400 });
-  }
+  const owned = new Set(
+    clipIds.length
+      ? (
+          await query<{ id: string }>(
+            `select id from audio_clip where id = any($1::uuid[]) and user_id = $2 and kind = 'checkup'`,
+            [clipIds, userId],
+          )
+        ).map((row) => row.id)
+      : [],
+  );
+  const answers = parsed.data.answers.map((a) => (a.clipId && !owned.has(a.clipId) ? { ...a, clipId: null } : a));
 
   const id = parsed.data.id ?? randomUUID();
   // Speaking in the check-up counts like any practice: week ring, Voice Points, family wins
-  const seconds = Math.round(parsed.data.answers.reduce((sum, a) => sum + a.seconds, 0));
+  const seconds = Math.round(answers.reduce((sum, a) => sum + a.seconds, 0));
   const saved = await saveCheckup({
     id,
     userId,
     month: journeyMonthNumber(profile.started_on),
-    answers: parsed.data.answers,
+    answers,
     seconds,
     points: pointsForSession(seconds),
   });
   if (saved === "conflict") return Response.json({ error: "Conflict" }, { status: 409 });
+  if (saved === "created" && seconds > 0) {
+    after(() => notifySquadOfWin(new Date(), userId).catch((error) => console.error("Squad notice failed", error)));
+  }
 
   const outcome = await scoreCheckup(id, userId).catch((error) => {
     console.error("Check-up scoring crashed", error);

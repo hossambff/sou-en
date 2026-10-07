@@ -20,6 +20,7 @@ import {
   useDrillVoice,
   type DrillMode,
   type OrbState,
+  useSaveDrillOnLeave,
 } from "../drill-ui";
 import { listenNotice, type Notice } from "../listen-notice";
 
@@ -104,6 +105,7 @@ export function ReviewClient(props: {
   const indexRef = useRef(0);
   const answered = useRef(false); // this word already counted (FSRS) in this round
   const run = useRef<Run>(emptyRun());
+  useSaveDrillOnLeave(run, "review", props.mode);
 
   function go(next: Phase) {
     phaseRef.current = next;

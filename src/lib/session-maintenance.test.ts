@@ -12,13 +12,13 @@ beforeEach(() => {
 });
 
 describe("closing abandoned sessions", () => {
-  it("closes only this learner's sessions, idle for 30 minutes", async () => {
+  it("closes only this learner's sessions, idle for 3 hours (a long Baby pause is never cut off)", async () => {
     await closeStaleSessions("user-1");
     const [sql, params] = db.query.mock.calls[0];
     expect(params).toEqual(["user-1", STALE_SESSION_MINUTES]);
-    expect(STALE_SESSION_MINUTES).toBe(30);
+    expect(STALE_SESSION_MINUTES).toBe(180);
     expect(sql).toMatch(/ended_at is null/);
-    // Idle = no message for 30 minutes (a long session she's still in is never closed)
+    // Idle = no message for 3 hours (a long session she's still in is never closed)
     expect(sql).toMatch(/max\(m\.created_at\)/);
     expect(sql).toMatch(/make_interval\(mins => \$2\)/);
     expect(sql).toContain(SESSION_POINTS_SQL);

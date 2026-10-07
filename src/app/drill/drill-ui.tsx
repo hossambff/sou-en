@@ -241,3 +241,39 @@ export function newRunId(): string {
 export function postJson(url: string, body: unknown): Promise<Response | null> {
   return fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
 }
+
+type DrillRun = { id: string; startedAt: number; speaking: number; attempts: unknown[] };
+
+/**
+ * Save the round's points if she leaves without tapping Finish (app swiped away, Back, phone locked
+ * for good). /api/drill/finish is idempotent per run id, so this is harmless after a normal finish.
+ */
+export function useSaveDrillOnLeave(run: { current: DrillRun }, kind: "shadow" | "review", mode: DrillMode) {
+  useEffect(() => {
+    const save = () => {
+      const current = run.current;
+      if (!current.id || current.attempts.length === 0) return;
+      const body = JSON.stringify({
+        kind,
+        runId: current.id,
+        speakingSeconds: Math.round(current.speaking),
+        elapsedSeconds: Math.round((Date.now() - current.startedAt) / 1000),
+        mode,
+      });
+      const sent = navigator.sendBeacon?.("/api/drill/finish", new Blob([body], { type: "application/json" }));
+      if (!sent) {
+        void fetch("/api/drill/finish", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+          keepalive: true,
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener("pagehide", save);
+    return () => {
+      window.removeEventListener("pagehide", save);
+      save();
+    };
+  }, [run, kind, mode]);
+}

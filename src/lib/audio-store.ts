@@ -55,11 +55,14 @@ export async function loadClipFor(id: string, viewerId: string) {
   );
 }
 
-/** Delete clips nobody references (abandoned uploads) after a day. Returns how many were removed. */
+/**
+ * Delete clips nobody references (abandoned uploads). Cheers get a day; check-up answers get a week,
+ * because a check-up can be paused mid-way (the baby wakes) and finished the next day.
+ */
 export async function deleteOrphanClips() {
   const rows = await query<{ id: string }>(
     `delete from audio_clip c
-      where c.created_at < now() - interval '1 day'
+      where c.created_at < now() - (case when c.kind = 'checkup' then interval '7 days' else interval '1 day' end)
         and not exists (select 1 from cheer ch where ch.clip_id = c.id)
         and not exists (
           select 1 from checkup k, jsonb_array_elements(coalesce(k.answers, '[]'::jsonb)) a
