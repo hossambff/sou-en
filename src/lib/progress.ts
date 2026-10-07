@@ -52,8 +52,12 @@ export function pointsForSession(speakingSeconds: number) {
 
 export function babyAgeLabel(birthdate: Date | string | null, now = new Date()) {
   if (!birthdate) return null;
-  const weeks = Math.floor((now.getTime() - new Date(birthdate).getTime()) / (7 * 86_400_000));
+  const born = new Date(birthdate);
+  const weeks = Math.floor((now.getTime() - born.getTime()) / (7 * 86_400_000));
   if (weeks < 0) return null;
-  if (weeks < 13) return `${weeks} weeks`;
-  return `${Math.floor(weeks / 4.345)} months`;
+  if (weeks < 13) return `${weeks} ${weeks === 1 ? "week" : "weeks"}`;
+  // Calendar months (Jan 1 → Oct 7 is 9 months, not 8.97)
+  let months = (now.getUTCFullYear() - born.getUTCFullYear()) * 12 + (now.getUTCMonth() - born.getUTCMonth());
+  if (now.getUTCDate() < born.getUTCDate()) months -= 1;
+  return `${months} months`;
 }

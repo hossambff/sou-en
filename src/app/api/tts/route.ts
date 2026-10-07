@@ -1,34 +1,48 @@
 import { z } from "zod";
 import { getUser } from "@/lib/session";
+import { queryOne } from "@/lib/db";
+import { cachedSpeech, serverVoiceConfigured, streamSpeech } from "@/lib/tts";
 
 export const maxDuration = 30;
 
-const body = z.object({ text: z.string().min(1).max(1200), slow: z.boolean().default(false) });
+const body = z.object({
+  text: z.string().min(1).max(1200),
+  slow: z.boolean().default(false),
+  /** Cache reusable phrases (drills, words, stories). Live conversation streams uncached. */
+  cache: z.boolean().default(false),
+});
 
-/** The coach's voice, via ElevenLabs. Streams MP3 back so playback starts quickly. */
+/**
+ * Hossam's voice. 200 = MP3. 501 = server voice unavailable (not configured or quota used up);
+ * the client then speaks with the phone's built-in voice.
+ */
 export async function POST(request: Request) {
   const user = await getUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
-  if (!apiKey || !voiceId) return new Response("Voice is not configured", { status: 501 });
+  if (!serverVoiceConfigured()) return new Response("Voice is not configured", { status: 501 });
 
-  const { text, slow } = body.parse(await request.json());
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=mp3_44100_64`,
-    {
-      method: "POST",
-      headers: { "xi-api-key": apiKey, "content-type": "application/json" },
-      body: JSON.stringify({
-        text,
-        model_id: process.env.ELEVENLABS_TTS_MODEL ?? "eleven_v3",
-        voice_settings: { stability: 0.55, similarity_boost: 0.75, style: 0.25, speed: slow ? 0.85 : 0.95 },
-      }),
-    },
+  const parsed = body.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) return new Response("Bad request", { status: 400 });
+  const { text, slow, cache } = parsed.data;
+
+  // The learner's chosen voice and speed apply to everyone listening in this family
+  const settings = await queryOne<{ voice_id: string | null; speech_rate: number }>(
+    `select voice_id, speech_rate from learner_profile order by created_at limit 1`,
   );
-  if (!response.ok || !response.body) {
-    console.error("TTS failed", response.status, await response.text());
-    return new Response("Voice failed", { status: 502 });
+  const options = {
+    voiceId: settings?.voice_id,
+    speed: (settings?.speech_rate ?? 0.95) * (slow ? 0.88 : 1),
+  };
+
+  if (cache) {
+    const audio = await cachedSpeech(text, options);
+    if (!audio) return new Response("Voice unavailable", { status: 501 });
+    return new Response(audio as BodyInit, {
+      headers: { "content-type": "audio/mpeg", "cache-control": "private, max-age=86400" },
+    });
   }
-  return new Response(response.body, { headers: { "content-type": "audio/mpeg", "cache-control": "no-store" } });
+
+  const stream = await streamSpeech(text, options);
+  if (!stream) return new Response("Voice unavailable", { status: 501 });
+  return new Response(stream, { headers: { "content-type": "audio/mpeg", "cache-control": "no-store" } });
 }

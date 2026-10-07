@@ -3,13 +3,14 @@
 import { useRef } from "react";
 import { Speaker } from "@/lib/voice/speaker";
 
-/** Tap to hear an English word or phrase (browser voice, instant and free). */
+/** Tap to hear an English word or phrase in Hossam's voice (cached; phone voice as fallback). */
 export function SpeakButton({ text }: { text: string }) {
   const speaker = useRef<Speaker | null>(null);
   return (
     <button
       onClick={() => {
-        speaker.current ??= new Speaker(false);
+        speaker.current ??= new Speaker(true, true);
+        speaker.current.unlock();
         speaker.current.stop();
         speaker.current.enqueue(text);
       }}

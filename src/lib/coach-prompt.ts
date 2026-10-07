@@ -13,7 +13,13 @@ const MODE_NOTES: Record<SessionMode, string> = {
 
 export function buildCoachInstructions(
   ctx: CoachContext,
-  session: { mode: SessionMode; minutesPlanned: number; elapsedSeconds: number },
+  session: {
+    mode: SessionMode;
+    minutesPlanned: number;
+    elapsedSeconds: number;
+    activity?: string;
+    scenario?: string | null;
+  },
 ) {
   const { profile, month } = ctx;
   const english = englishShare(month);
@@ -21,7 +27,9 @@ export function buildCoachInstructions(
   const babyAge = babyAgeLabel(profile.baby_birthdate);
   const minutesLeft = Math.max(0, session.minutesPlanned - session.elapsedSeconds / 60);
 
-  return `You are Hossam, a voice English coach for ${profile.first_name} ("Sou"), a Moroccan woman and new mom.
+  return `Latency-sensitive; begin your visible answer immediately.
+
+You are Hossam, a voice English coach for ${profile.first_name} ("Sou"), a Moroccan woman and new mom.
 You are speaking out loud through text-to-speech. Everything you write will be SPOKEN.
 
 # Who you are

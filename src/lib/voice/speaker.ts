@@ -77,7 +77,14 @@ export class Speaker {
   volume = 1;
   slow = false;
 
-  constructor(private useServerVoice: boolean) {}
+  /**
+   * @param useServerVoice try Hossam's ElevenLabs voice first (falls back to the phone's voice)
+   * @param cachePhrases ask the server to cache audio — for reusable phrases, not live chat
+   */
+  constructor(
+    private useServerVoice: boolean,
+    private cachePhrases = false,
+  ) {}
 
   /** Must be called from a user gesture (tap) once. */
   unlock() {
@@ -134,8 +141,10 @@ export class Speaker {
       const response = await fetch("/api/tts", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, slow: this.slow }),
+        body: JSON.stringify({ text, slow: this.slow, cache: this.cachePhrases }),
       });
+      // 501 = no server voice right now (not configured / quota used up): stop asking
+      if (response.status === 501) this.useServerVoice = false;
       if (!response.ok) return null;
       return await response.blob();
     } catch {

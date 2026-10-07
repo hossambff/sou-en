@@ -1,5 +1,5 @@
 // Creates/updates Better Auth tables, then the app tables. Run: npm run db:migrate
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { getMigrations } from "better-auth/db/migration";
 import { auth } from "../src/lib/auth";
 import { pool } from "../src/lib/pool";
@@ -11,8 +11,13 @@ async function main() {
   console.log(`Auth: ${toBeCreated.length} tables to create, ${toBeAdded.length} to update`);
   await runMigrations();
 
-  await pool.query(await readFile(new URL("../db/app-schema.sql", import.meta.url), "utf8"));
-  console.log("App schema applied ✓");
+  // App schema: every db/*.sql file, in name order (00-core, 05-foundation, 10-…)
+  const dir = new URL("../db/", import.meta.url);
+  const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
+  for (const file of files) {
+    await pool.query(await readFile(new URL(file, dir), "utf8"));
+    console.log(`Applied ${file} ✓`);
+  }
   await pool.end();
 }
 

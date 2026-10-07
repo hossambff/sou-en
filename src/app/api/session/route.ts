@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { getUser } from "@/lib/session";
+import { getLearnerUserId } from "@/lib/session";
 import { queryOne } from "@/lib/db";
 
 const body = z.object({
@@ -8,12 +8,12 @@ const body = z.object({
 });
 
 export async function POST(request: Request) {
-  const user = await getUser();
-  if (!user) return new Response("Unauthorized", { status: 401 });
+  const userId = await getLearnerUserId();
+  if (!userId) return new Response("Unauthorized", { status: 401 });
   const { mode, minutes } = body.parse(await request.json());
   const row = await queryOne<{ id: string }>(
     `insert into coach_session (user_id, mode, minutes_planned) values ($1, $2, $3) returning id`,
-    [user.id, mode, minutes],
+    [userId, mode, minutes],
   );
   return Response.json({ id: row!.id });
 }

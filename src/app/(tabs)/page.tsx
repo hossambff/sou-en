@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { requireUser } from "@/lib/session";
+import { requireLearner } from "@/lib/session";
 import { getDashboard, getProfile } from "@/lib/learner";
 import { CITIES, babyAgeLabel, levelFor, monthOfJourney } from "@/lib/progress";
 import { StartPanel } from "@/components/start-panel";
@@ -8,7 +8,7 @@ import { WeekRing } from "@/components/week-ring";
 import { SignOutButton } from "@/components/sign-out-button";
 
 export default async function HomePage() {
-  const user = await requireUser();
+  const { user } = await requireLearner();
   const profile = await getProfile(user.id);
   if (!profile) redirect("/onboarding");
 

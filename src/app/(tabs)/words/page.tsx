@@ -1,10 +1,9 @@
-import Link from "next/link";
-import { requireUser } from "@/lib/session";
+import { requireLearner } from "@/lib/session";
 import { query } from "@/lib/db";
 import { SpeakButton } from "@/components/speak-button";
 
 export default async function WordGardenPage() {
-  const user = await requireUser();
+  const { user } = await requireLearner();
   const words = await query<{ term: string; meaning: string; example: string | null; times_produced: number; due: Date }>(
     `select term, meaning, example, times_produced, due from vocab_item where user_id = $1 order by created_at desc`,
     [user.id],
@@ -14,10 +13,7 @@ export default async function WordGardenPage() {
 
   return (
     <main className="zellige flex flex-1 flex-col px-4 pb-10 pt-[max(1.25rem,env(safe-area-inset-top))]">
-      <div className="mx-auto w-full max-w-md">
-        <Link href="/" className="inline-block rounded-full py-2 pr-3 text-sm text-ink-soft">
-          ‹ Home
-        </Link>
+      <div className="mx-auto w-full max-w-md pt-2">
         <h1 className="font-display text-3xl font-semibold tracking-tight">Word Garden</h1>
         <p className="mt-1 text-sm text-ink-soft">
           Every word you learn with Hossam is planted here. Say it out loud in a session to make it grow: 🌱 → 🌿 → 🌷 → 🌳
