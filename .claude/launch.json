@@ -15,7 +15,7 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": [
         "-c",
-        "export PATH=$HOME/.nvm/versions/node/v22.23.3/bin:$PATH && DATABASE_URL=postgres://postgres:postgres@localhost:5433/postgres BETTER_AUTH_URL=http://localhost:3001 ALLOWED_EMAILS=learner@sou.test,partner@sou.test LEARNER_EMAIL=learner@sou.test npm run dev -- --port 3001"
+        "export PATH=$HOME/.nvm/versions/node/v22.23.3/bin:$PATH && npm run dev:local"
       ],
       "port": 3001
     }
