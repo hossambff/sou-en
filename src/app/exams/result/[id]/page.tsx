@@ -64,7 +64,7 @@ export default async function ExamResultPage({ params }: PageProps<"/exams/resul
             <p className="mt-2 text-sm text-ink-soft">
               Your answers for {unit ? `Unit ${position?.index}: ${unit.title}` : "this unit"} are saved safely. Your result will appear here as soon as he&apos;s had a listen.
             </p>
-            <RetryScoreButton url={`/api/exams/${exam.id}`} />
+            <RetryScoreButton url={`/api/exams/${exam.id}`} auto />
           </header>
         ) : exam.passed ? (
           <header className="rounded-[2rem] border border-line bg-card p-5 text-center shadow-card animate-rise">

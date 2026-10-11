@@ -68,7 +68,8 @@ export async function getDashboard(userId: string, startedOn: string, timeZone?:
   const [totals, week, words] = await Promise.all([
     queryOne<{ points: number; sessions: number; chats: number; speaking_seconds: number }>(
       `select coalesce(sum(points), 0)::int as points,
-              count(*) filter (where ended_at is not null)::int as sessions,
+              -- a drill homework completing itself (no speaking time) isn't a separate session
+              count(*) filter (where ended_at is not null and not (activity = 'homework' and speaking_seconds = 0))::int as sessions,
               count(*) filter (where ended_at is not null and activity = any($2::text[]))::int as chats,
               coalesce(sum(speaking_seconds), 0)::int as speaking_seconds
          from coach_session where user_id = $1`,
@@ -209,9 +210,12 @@ export async function getPlanContext(userId: string, startedOn: string, timeZone
   const zone = timeZone ?? (await learnerTimeZone(userId));
   const [activities, mistakes, storiesToday, checkups] = await Promise.all([
     query<{ activity: string }>(
+      // A drill homework completing itself (a 'homework' row with no speaking time) isn't "homework
+      // done": the plan's homework bite is the voice note Hossam reviews
       `select distinct activity from coach_session
         where user_id = $1 and ended_at is not null
-          and (started_at at time zone $2)::date = (now() at time zone $2)::date`,
+          and (started_at at time zone $2)::date = (now() at time zone $2)::date
+          and not (activity = 'homework' and speaking_seconds = 0)`,
       [userId, zone],
     ),
     // Mistakes since her last "fix my mistakes" session (last 30 days at most)
@@ -233,7 +237,10 @@ export async function getPlanContext(userId: string, startedOn: string, timeZone
 
   const doneToday = new Set<BiteKind>();
   for (const { activity } of activities) {
-    if (["chat", "roleplay", "retell", "fixes", "shadow", "review"].includes(activity)) doneToday.add(activity as BiteKind);
+    // homework: she handed in a voice note today; exam: she sat a unit exam today (no second push after a fail)
+    if (["chat", "roleplay", "retell", "fixes", "shadow", "review", "homework", "exam"].includes(activity)) {
+      doneToday.add(activity as BiteKind);
+    }
   }
   if ((storiesToday?.n ?? 0) > 0) doneToday.add("story");
   if (checkups.doneToday) doneToday.add("checkup");
@@ -296,7 +303,8 @@ export async function getProgressData(userId: string, startedOn: string, timeZon
   return {
     totals: {
       speakingMinutes: Math.round(sessions.reduce((sum, s) => sum + s.seconds, 0) / 60),
-      sessions: sessions.length,
+      // A drill homework completing itself (no speaking time) earns points but isn't a separate session
+      sessions: sessions.filter((s) => !(s.activity === "homework" && s.seconds === 0)).length,
       points: sessions.reduce((sum, s) => sum + s.points, 0),
       words: words?.n ?? 0,
     },

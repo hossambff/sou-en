@@ -12,12 +12,14 @@ import {
 } from "@/lib/curriculum";
 import { structured } from "@/lib/claude";
 import { babyAgeLabel, pointsForSession } from "@/lib/progress";
-import { type Db, defaultDb, inTransaction, one, together } from "./db";
+import { claudeBudgetMs } from "./budget";
+import { type Db, defaultDb, inTransaction, one, rows, together } from "./db";
 import { fillTranscripts } from "./transcribe";
 import {
   buildPlacementResult,
   englishWordCount,
   normalizeRubric,
+  placementIsForwardOnly,
   placementRetakeAt,
   placementUpdate,
   stepsFromAnswers,
@@ -42,6 +44,8 @@ export type StoredPlacementResult = PlacementResult & {
   before: LearnerLevelState | null;
   /** What this placement set on her profile (null: not applied, e.g. she had already moved on). */
   applied: { level: Cefr; unitId: string } | null;
+  /** How it was applied (kept so a re-score applies it the same way). Missing on older rows. */
+  forwardOnly?: boolean;
 };
 
 export type PlacementRow = {
@@ -70,29 +74,58 @@ export async function skipPlacement(userId: string, db: Db = defaultDb) {
 
 export type PlacementOverview = {
   status: "pending" | "skipped" | "done";
-  latest: { id: string; status: PlacementRow["status"]; cefr: string | null; finishedAt: string | null } | null;
+  latest: {
+    id: string;
+    status: PlacementRow["status"];
+    cefr: string | null;
+    finishedAt: string | null;
+    /** She skipped the speaking part of it (a capped first guess) */
+    speakingSkipped: boolean;
+  } | null;
   /** When she may retake it (null = now). Only a done placement has a weekly limit. */
   retakeAt: Date | null;
 };
+
+type LatestPlacement = { id: string; status: PlacementRow["status"]; cefr: string | null; finished_at: Date | null; speaking_skipped: boolean | null };
+
+/** Her latest finished placement (with whether she skipped its speaking part). */
+function latestPlacement(userId: string, db: Db) {
+  return one<LatestPlacement>(
+    db,
+    `select id, status, cefr, finished_at, coalesce((result->>'speakingSkipped')::boolean, false) as speaking_skipped
+       from placement_test where user_id = $1 and finished_at is not null order by finished_at desc limit 1`,
+    [userId],
+  );
+}
+
+/**
+ * When a retake opens (null = now). A week after the last one, but right away when she skipped the
+ * speaking part last time (that level is only a capped first guess) or never placed.
+ */
+function retakeOpensAt(placedBefore: boolean, latest: LatestPlacement | null) {
+  if (!placedBefore || latest?.speaking_skipped) return null;
+  return placementRetakeAt(latest?.finished_at);
+}
 
 export async function placementOverview(userId: string, db: Db = defaultDb): Promise<PlacementOverview> {
   const [profile, latest] = await together(
     db,
     () => one<{ placement_status: PlacementOverview["status"] }>(db, `select placement_status from learner_profile where user_id = $1`, [userId]),
-    () => one<{ id: string; status: PlacementRow["status"]; cefr: string | null; finished_at: Date | null }>(
-      db,
-      `select id, status, cefr, finished_at from placement_test
-        where user_id = $1 and finished_at is not null order by finished_at desc limit 1`,
-      [userId],
-    ),
+    () => latestPlacement(userId, db),
   );
   const status = profile?.placement_status ?? "pending";
   return {
     status,
     latest: latest
-      ? { id: latest.id, status: latest.status, cefr: latest.cefr, finishedAt: latest.finished_at ? new Date(latest.finished_at).toISOString() : null }
+      ? {
+          id: latest.id,
+          status: latest.status,
+          cefr: latest.cefr,
+          finishedAt: latest.finished_at ? new Date(latest.finished_at).toISOString() : null,
+          speakingSkipped: Boolean(latest.speaking_skipped),
+        }
       : null,
-    retakeAt: status === "done" ? placementRetakeAt(latest?.finished_at) : null,
+    retakeAt: retakeOpensAt(status === "done", latest),
   };
 }
 
@@ -112,7 +145,9 @@ export type SavePlacementOutcome =
 
 /**
  * Saves a finished placement test at most once per client id (a retry after a timeout finds it).
- * A retake within a week of the last one is refused.
+ * A retake within a week of the last one is refused (unless she skipped the speaking last time).
+ * It counts as a retake (forward-only) when she had placed before or already made progress in the
+ * course: passed a unit exam, or an exam set her unit.
  */
 export async function savePlacement(
   input: { id: string; userId: string; answers: PlacementAnswer[]; elapsedSeconds: number },
@@ -122,22 +157,19 @@ export async function savePlacement(
     const existing = await one<{ user_id: string }>(tx, `select user_id from placement_test where id = $1`, [input.id]);
     if (existing) return { outcome: existing.user_id === input.userId ? "exists" : "conflict" };
     // Lock her profile: two parallel submits can't both slip past the weekly limit
-    const profile = await one<{ placement_status: string }>(
+    const profile = await one<{ placement_status: string; current_unit: string | null }>(
       tx,
-      `select placement_status from learner_profile where user_id = $1 for update`,
+      `select placement_status, current_unit from learner_profile where user_id = $1 for update`,
       [input.userId],
     );
     if (!profile) return { outcome: "conflict" };
-    const retake = profile.placement_status === "done";
-    if (retake) {
-      const last = await one<{ finished_at: Date }>(
-        tx,
-        `select finished_at from placement_test where user_id = $1 and finished_at is not null order by finished_at desc limit 1`,
-        [input.userId],
-      );
-      const retakeAt = placementRetakeAt(last?.finished_at);
+    const placedBefore = profile.placement_status === "done";
+    if (placedBefore) {
+      const retakeAt = retakeOpensAt(true, await latestPlacement(input.userId, tx));
       if (retakeAt) return { outcome: "too-soon", retakeAt };
     }
+    const passedAny = await one(tx, `select 1 from unit_progress where user_id = $1 and status = 'passed' limit 1`, [input.userId]);
+    const retake = placedBefore || profile.current_unit !== null || Boolean(passedAny);
     await tx.query(
       `insert into placement_test (id, user_id, started_at, finished_at, status, answers, retake)
        values ($1, $2, now() - make_interval(secs => $3::float8), now(), 'pending', $4::jsonb, $5)
@@ -181,6 +213,8 @@ export type VerdictInput = {
   userId: string;
   answers: Extract<PlacementAnswer, { section: "speaking" }>[];
   sections: PlacementResult["sections"];
+  /** How long Hossam may take (the rest of the route's time budget) */
+  timeoutMs: number;
 };
 
 const isSpeaking = (a: PlacementAnswer): a is Extract<PlacementAnswer, { section: "speaking" }> => a.section === "speaking";
@@ -215,14 +249,15 @@ export async function scorePlacement(
     const level = isCefr(current.cefr) ? current.cefr : null;
     return current.status === "scored" && level ? { status: "scored", level } : { status: "pending", level, reason: "unavailable" };
   }
+  const startedAt = Date.now();
   try {
-    return await scoreClaimed(id, userId, db, askHossam);
+    return await scoreClaimed(id, userId, db, askHossam, startedAt);
   } finally {
     await db.query(`update placement_test set scoring_started_at = null where id = $1`, [id]).catch(() => {});
   }
 }
 
-async function scoreClaimed(id: string, userId: string, db: Db, askHossam: VerdictSource): Promise<PlacementScoreOutcome> {
+async function scoreClaimed(id: string, userId: string, db: Db, askHossam: VerdictSource, startedAt: number): Promise<PlacementScoreOutcome> {
   const row = await loadPlacement(id, userId, db);
   if (!row) throw new Error("Placement test not found");
 
@@ -233,10 +268,13 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
   const waitingForTranscript = spoken.some((a) => a.clipId && !a.transcript.trim() && !a.sttTried);
   const toGrade = spoken.filter((a) => englishWordCount(a.transcript) > 0);
 
+  // Hossam listens once every answer has its transcript (a partial verdict would just be paid for twice).
+  // His time is bounded so the provisional level is always applied before the route's maxDuration.
   let verdict: HossamVerdict | null = null;
-  if (toGrade.length) {
+  const timeoutMs = claudeBudgetMs(startedAt);
+  if (toGrade.length && !waitingForTranscript && timeoutMs) {
     const draft = buildPlacementResult(steps);
-    verdict = await askHossam({ userId, answers: toGrade, sections: draft.sections }).catch((error) => {
+    verdict = await askHossam({ userId, answers: toGrade, sections: draft.sections, timeoutMs }).catch((error) => {
       console.error("Placement scoring failed", error);
       return null;
     });
@@ -245,9 +283,9 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
   const result = { ...buildPlacementResult({ ...steps, verdict }), provisional: pending };
 
   return inTransaction(db, async (tx) => {
-    const profile = await one<{ cefr_level: string; current_unit: string | null; skill_scores: SkillScores | null }>(
+    const profile = await one<{ cefr_level: string; current_unit: string | null; skill_scores: SkillScores | null; placement_status: string }>(
       tx,
-      `select cefr_level, current_unit, skill_scores from learner_profile where user_id = $1 for update`,
+      `select cefr_level, current_unit, skill_scores, placement_status from learner_profile where user_id = $1 for update`,
       [userId],
     );
     const fresh = await one<{ status: string; result: StoredPlacementResult | null }>(
@@ -281,10 +319,23 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
       movedOn = true; // scored before without being applied: leave her profile alone
     }
 
-    let stored: StoredPlacementResult = { ...result, before: prior?.before ?? null, applied: prior?.applied ?? null };
+    let stored: StoredPlacementResult = {
+      ...result,
+      before: prior?.before ?? null,
+      applied: prior?.applied ?? null,
+      ...(prior?.forwardOnly !== undefined ? { forwardOnly: prior.forwardOnly } : {}),
+    };
     if (!movedOn) {
       const before = prior?.before ?? current;
-      const next = placementUpdate(before, result, row.retake);
+      const passedRows = await rows<{ unit_id: string; passed_at: Date | null }>(
+        tx,
+        `select unit_id, passed_at from unit_progress where user_id = $1 and status = 'passed'`,
+        [userId],
+      );
+      const passed = new Set(passedRows.map((r) => r.unit_id));
+      const forwardOnly =
+        prior?.forwardOnly ?? (await decideForwardOnly(tx, { id, userId, row, profile, passedAt: passedRows.map((r) => r.passed_at) }));
+      const next = placementUpdate(before, result, forwardOnly, passed);
       const unitId = next.unitId ?? result.startUnit;
       await tx.query(
         `update learner_profile
@@ -292,17 +343,19 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
           where user_id = $1`,
         [userId, next.level, unitId, JSON.stringify(next.skills), row.finished_at ?? new Date()],
       );
-      // A re-score that changed her starting unit: drop the provisional unit if she never worked on it
-      if (prior?.applied && prior.applied.unitId !== unitId) {
+      // Her unit changed (a re-score, or a retake that moved her): drop the old unit's row if she never
+      // worked on it, so coming back to it later starts it afresh
+      const replaced = prior?.applied?.unitId ?? current.unitId;
+      if (replaced && replaced !== unitId) {
         await tx.query(
           `delete from unit_progress
             where user_id = $1 and unit_id = $2 and status = 'active' and mastery = 0
               and not exists (select 1 from exam where user_id = $1 and unit_id = $2)`,
-          [userId, prior.applied.unitId],
+          [userId, replaced],
         );
       }
       await tx.query(`insert into unit_progress (user_id, unit_id) values ($1, $2) on conflict (user_id, unit_id) do nothing`, [userId, unitId]);
-      stored = { ...result, before, applied: { level: next.level, unitId } };
+      stored = { ...result, before, applied: { level: next.level, unitId }, forwardOnly };
     }
 
     await tx.query(
@@ -313,6 +366,36 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
       ? { status: "pending" as const, level: result.level, reason: waitingForTranscript ? ("no-transcript" as const) : ("unavailable" as const) }
       : { status: "scored" as const, level: result.level };
   });
+}
+
+/**
+ * Should this placement only move her forward? (See placementIsForwardOnly.) Progress = a passed unit,
+ * or a unit set by an exam before she ever placed.
+ */
+async function decideForwardOnly(
+  tx: Db,
+  input: {
+    id: string;
+    userId: string;
+    row: PlacementRow;
+    profile: { current_unit: string | null; placement_status: string } | null;
+    passedAt: (Date | null)[];
+  },
+) {
+  const progressed = input.passedAt.length > 0 || (input.profile?.placement_status !== "done" && Boolean(input.profile?.current_unit));
+  if (!input.row.retake && !progressed) return false;
+  // Her last placement that was applied to her profile, before this one
+  const previous = await one<{ status: string; finished_at: Date; provisional: boolean | null; speaking_skipped: boolean | null }>(
+    tx,
+    `select status, finished_at, (result->>'provisional')::boolean as provisional, (result->>'speakingSkipped')::boolean as speaking_skipped
+       from placement_test
+      where user_id = $1 and id <> $2 and finished_at is not null and finished_at < $3 and jsonb_typeof(result->'applied') = 'object'
+      order by finished_at desc limit 1`,
+    [input.userId, input.id, input.row.finished_at ?? new Date()],
+  );
+  const previousProvisional = Boolean(previous && (previous.status === "pending" || previous.provisional || previous.speaking_skipped));
+  const passedSincePrevious = Boolean(previous && input.passedAt.some((at) => at && new Date(at) > new Date(previous.finished_at)));
+  return placementIsForwardOnly({ retake: input.row.retake, progressed, previousProvisional, passedSincePrevious });
 }
 
 // ── Hossam's ears (Claude) ──────────────────────────────────────────────────
@@ -384,7 +467,16 @@ export async function askHossamForVerdict(input: VerdictInput): Promise<HossamVe
     }),
   ].join("\n");
 
-  const raw = await structured({ schema: verdictSchema, instructions: INSTRUCTIONS, prompt, effort: "medium", maxTokens: 6000 });
+  // One bounded attempt: a timeout falls back to the provisional level (a later visit retries)
+  const raw = await structured({
+    schema: verdictSchema,
+    instructions: INSTRUCTIONS,
+    prompt,
+    effort: "medium",
+    maxTokens: 6000,
+    timeoutMs: input.timeoutMs,
+    maxRetries: 0,
+  });
   const cefr = isCefr(raw.cefr) ? raw.cefr : "A1";
   return {
     rubric: normalizeRubric({ fluency: raw.fluency, range: raw.range, accuracy: raw.accuracy, coherence: raw.coherence }),

@@ -3,12 +3,20 @@ import { DAILY_STT_LIMIT, bumpUsage, getUsage } from "@/lib/usage";
 import { type Db, defaultDb, one } from "./db";
 
 const STT_MODEL = process.env.ELEVENLABS_STT_MODEL ?? "scribe_v2";
-const STT_TIMEOUT_MS = 20_000;
+/** Kept short: scoring has to fit STT + Claude inside a 60 s route (see budget.ts). */
+export const STT_TIMEOUT_MS = 15_000;
+
+/**
+ * ElevenLabs rejected this file itself (bad/empty/too large/unsupported audio): retrying won't help, so
+ * it counts as tried and the answer is scored without words. Auth (401/403), rate limits (429) and
+ * timeouts (408) are not about the file: those are retried later.
+ */
+const CLIP_REJECTED = new Set([400, 413, 415, 422]);
 
 /**
  * Server-side transcription of one of her saved recordings (when the phone couldn't transcribe it).
  * null = not attempted (no key, daily limit reached, service down): a later retry may try again.
- * "" = the clip is gone, isn't hers, or nothing was said.
+ * "" = the clip is gone, isn't hers, was rejected as audio, or nothing was said.
  */
 export async function transcribeClip(clipId: string, userId: string, db: Db = defaultDb): Promise<string | null> {
   const apiKey = process.env.ELEVENLABS_API_KEY;
@@ -31,7 +39,7 @@ export async function transcribeClip(clipId: string, userId: string, db: Db = de
       body: form,
       signal: AbortSignal.timeout(STT_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+    if (!response.ok) return CLIP_REJECTED.has(response.status) ? "" : null;
     const data = (await response.json()) as { text?: string };
     return (data.text ?? "").trim();
   } catch {

@@ -3,14 +3,19 @@
 /**
  * Live listening: Sou's words appear while she speaks.
  * Mic PCM (AudioWorklet, 16 kHz) streams to ElevenLabs realtime Scribe over a WebSocket opened with a
- * single-use token from /api/stt/token (one token = one turn = one socket). The server's VAD ends her
- * turn after ~1.2 s of quiet (1.8 s whispering); a local pause detector, a 45 s cap and her "done" tap
- * commit by hand when needed. Mixed Darija/French/English: no language is forced.
+ * single-use token from /api/stt/token (one token = one turn = one socket). Mixed Darija/French/English:
+ * no language is forced.
+ *
+ * She is a beginner: she stops mid-sentence to find a word. So the server's VAD commits (after 1.5 s of
+ * quiet, 2 s whispering) are only SEGMENTS of her turn: their text is collected and shown with the words
+ * still coming. Her TURN ends after a longer pause (2.2 s, 2.8 s whispering: see turnPauseMs), her "done"
+ * tap, or the 45 s cap; whatever the server hasn't committed yet is then committed by hand.
  *
  * Same contract as Listener.hear() (heard / silence / unclear / failed), plus onPartial.
  * When live listening can't work, nothing is lost:
  *   - before she speaks (no token, socket refused, no AudioWorklet): the turn goes to the batch Listener;
- *   - after she started (socket dropped, error, quota): her captured audio is sent to /api/stt as WAV;
+ *   - after she started (socket dropped, error, quota, no final text after a commit): her whole captured
+ *     turn is sent to /api/stt as WAV (the live words are used only if that fails too);
  *   - then the batch Listener is used for a while (60 s, doubling to 10 min; for good on quota/limit).
  */
 
@@ -18,6 +23,7 @@ import { Listener, sttFailure, type ListenOptions, type ListenResult } from "./l
 import { PcmCapture, SpeechGate, canCapturePcm, loadCaptureWorklet, type Capture, type CaptureHandlers } from "./capture";
 import { cleanForSpeech } from "./sentences";
 import { TARGET_RATE, bytesToBase64 } from "./wav";
+import { turnPauseMs } from "./turn";
 
 export const REALTIME_ENDPOINT = "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
 /** After a passing failure, use the batch Listener this long (doubles on repeated failures). */
@@ -28,10 +34,18 @@ const MAX_UTTERANCE_MS = 45_000;
 const TOKEN_MAX_AGE_MS = 12 * 60_000;
 const TOKEN_TIMEOUT_MS = 6_000;
 const CONNECT_TIMEOUT_MS = 6_000;
-/** After a manual commit, wait this long for the final text (then use the last partial). */
+/** After a manual commit, wait this long (once the socket has sent everything) for the final text. */
 const COMMIT_WAIT_MS = 3_000;
-/** The server's VAD should have ended the turn by now; if not (a whisper it can't hear), commit by hand. */
-const LOCAL_COMMIT_GRACE_MS = 1_800;
+/** …but never longer than this (a slow uplink): then her captured audio is transcribed in one go. */
+const COMMIT_MAX_WAIT_MS = 10_000;
+/** The capture worklet should start in well under this (it's preloaded): else the batch Listener takes the turn. */
+const CAPTURE_START_TIMEOUT_MS = 3_000;
+/** The server's words trail her voice by about this much (audio queue, network, processing). */
+const WORDS_LAG_MS = 700;
+/** The server committed all her words but the local gate still hears "voice" (a noisy room): end this much later. */
+const NOISY_ROOM_EXTRA_MS = 2_000;
+/** The rescue WAV keeps at most the last this-many seconds of her turn (the longest turn, plus padding). */
+const RESCUE_MAX_SECONDS = MAX_UTTERANCE_MS / 1000 + 5;
 const STT_TIMEOUT_MS = 20_000;
 /** previous_text works best under 50 characters (ElevenLabs). */
 const PREVIOUS_TEXT_CHARS = 50;
@@ -43,10 +57,13 @@ export type LiveListenOptions = ListenOptions & {
   previousText?: string;
 };
 
-/** Pause that ends her turn on the server: longer while whispering. */
+/** Pause after which the server commits one segment of her turn (not the end of it): longer while whispering. */
 export function vadSilenceSeconds(whisper: boolean) {
-  return whisper ? 1.8 : 1.2;
+  return whisper ? 2.0 : 1.5;
 }
+
+/** Pause that ends her TURN (shared with the batch Listener). Longer than the server's segment pause. */
+export { turnPauseMs };
 
 /** The realtime WebSocket URL for one turn (pure). */
 export function realtimeUrl(token: string, whisper: boolean) {
@@ -136,6 +153,8 @@ export function classifyError(kind: string | undefined): "benign" | "quota" | "c
 
 /** The parts of a WebSocket a turn uses (a fake one in tests). */
 export type SocketLike = {
+  /** Bytes queued but not sent yet (a slow uplink) */
+  readonly bufferedAmount?: number;
   send(data: string): void;
   close(code?: number): void;
   onopen: ((event: unknown) => void) | null;
@@ -301,8 +320,8 @@ export class RealtimeListener {
     return this.tokenPending;
   }
 
-  /** Takes the stored token (fetching one if needed). A turn that ended meanwhile takes nothing. */
-  private async claimToken(stillWanted: () => boolean): Promise<TokenResult> {
+  /** Takes the stored token (fetching one if needed). A turn that no longer wants it takes nothing. */
+  private async claimToken(stillWanted: () => boolean): Promise<{ token: string; at: number } | { status: number }> {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!this.hasFreshToken()) {
         const status = await this.requestToken();
@@ -310,12 +329,18 @@ export class RealtimeListener {
       }
       if (!stillWanted()) return { status: -1 };
       if (this.token && this.hasFreshToken()) {
-        const value = this.token.value;
+        const claimed = { token: this.token.value, at: this.token.at };
         this.token = null; // single use
-        return { token: value };
+        return claimed;
       }
     }
     return { status: 0 };
+  }
+
+  /** A claimed token the turn didn't use after all: kept (with its real age) for the next turn. */
+  private keepToken(claimed: { token: string; at: number }, epoch: number) {
+    if (epoch !== this.epoch || this.token || Date.now() - claimed.at >= TOKEN_MAX_AGE_MS) return;
+    this.token = { value: claimed.token, at: claimed.at };
   }
 
   private tokenFailed(status: number) {
@@ -338,13 +363,12 @@ export class RealtimeListener {
 
   private listenLive(options: LiveListenOptions, context: AudioContext, stream: MediaStream): Promise<ListenResult> {
     const { whisper, noSpeechTimeoutMs = 25_000, onLevel, onSpeechStart, onPartial } = options;
+    const epoch = this.epoch;
     return new Promise<ListenResult>((resolve) => {
       const gate = new SpeechGate(whisper);
       const startedAt = performance.now();
-      /** Quiet this long after speech and still no commit from the server: commit by hand */
-      const localCommitMs = vadSilenceSeconds(whisper) * 1000 + LOCAL_COMMIT_GRACE_MS;
-      /** Rescue mode (socket gone) ends her turn like the batch Listener does */
-      const rescueSilenceMs = whisper ? 2000 : 1500;
+      /** Quiet this long ends her turn (see turnPauseMs) */
+      const pauseMs = turnPauseMs(whisper);
       let mode: "live" | "committing" | "rescue" | "done" = "live";
       let capture: Capture | null = null;
       let socket: SocketLike | null = null;
@@ -353,15 +377,37 @@ export class RealtimeListener {
       let commitSent = false;
       let uploading = false;
       let spoke = false;
-      let partial = "";
-      let lastPartialAt = 0;
+      /** What first told us she speaks: the local gate (its start is exact) or the server's words (they come late) */
+      let speechSeenBy: "gate" | "words" | null = null;
       let firstSpeechAt = 0;
+      /** Her committed segments so far, and the server's words for the segment still open */
+      const segments: string[] = [];
+      let partial = "";
+      let shown = "";
+      /** When the server's words last changed, and when it last committed (performance.now()) */
+      let lastWordsAt = -Infinity;
+      let lastCommitAt = -Infinity;
+      /** 16 kHz samples captured so far, and where her turn ended (for the rescue WAV) */
+      let capturedSamples = 0;
+      let endSample = Infinity;
       const queue: Int16Array[] = [];
       let watchdog = 0;
+      let captureTimer = 0;
       let connectTimer = 0;
       let commitTimer = 0;
 
-      const seconds = () => (gate.speaking ? gate.seconds() : Math.max(1, partial.split(/\s+/).filter(Boolean).length * 0.4));
+      /** Everything she said so far: the committed segments, then the words still coming. */
+      const words = () => [...segments, partial].filter(Boolean).join(" ");
+
+      const seconds = () => (gate.speaking ? gate.seconds() : Math.max(1, words().split(/\s+/).filter(Boolean).length * 0.4));
+
+      /** Her words on screen, across segments (never blanked). */
+      const showWords = () => {
+        const text = words();
+        if (!text || text === shown) return;
+        shown = text;
+        onPartial?.(text);
+      };
 
       const closeSocket = () => {
         const current = socket;
@@ -377,6 +423,7 @@ export class RealtimeListener {
       const cleanup = () => {
         mode = "done";
         window.clearInterval(watchdog);
+        window.clearTimeout(captureTimer);
         window.clearTimeout(connectTimer);
         window.clearTimeout(commitTimer);
         if (this.cancelCurrent === cancel) this.cancelCurrent = null;
@@ -392,6 +439,13 @@ export class RealtimeListener {
         resolve(result);
       };
 
+      /** Every word of her turn is committed: what she said, or that nothing could be made of it. */
+      const finishWithWords = () => {
+        const text = words();
+        if (text) return finishTurn({ kind: "heard", text, seconds: seconds() });
+        finishTurn(spoke ? { kind: "unclear", seconds: seconds() } : { kind: "silence" });
+      };
+
       /** Nothing said yet: the batch Listener takes this whole turn. */
       const delegate = () => {
         if (mode === "done") return;
@@ -399,9 +453,10 @@ export class RealtimeListener {
         resolve(this.batch.hear(options));
       };
 
-      const signalSpeech = () => {
+      const signalSpeech = (by: "gate" | "words") => {
         if (spoke) return;
         spoke = true;
+        speechSeenBy = by;
         firstSpeechAt = performance.now();
         onSpeechStart?.();
       };
@@ -421,7 +476,21 @@ export class RealtimeListener {
         socket!.send(JSON.stringify(message));
       };
 
-      /** Her captured turn → /api/stt as WAV (the socket is gone but her words aren't). */
+      /**
+       * Where her turn is in the capture: up to where it ended, from just before the gate heard her start —
+       * or, when the server's words came first (they arrive late), everything; at most the last ~50 s.
+       */
+      const rescueSpan = () => {
+        const to = Math.min(endSample, capturedSamples);
+        const earliest = Math.max(0, to - RESCUE_MAX_SECONDS * TARGET_RATE);
+        const from = speechSeenBy === "gate" ? Math.max(earliest, gate.span(0.5, 0).from) : earliest;
+        return { from, to };
+      };
+
+      /**
+       * Her whole captured turn → /api/stt as WAV: the socket is gone (or never sent the final text), her
+       * words aren't. The live words are used only if that fails: they may miss the end of her sentence.
+       */
       const upload = async () => {
         if (mode === "done" || uploading) return;
         uploading = true;
@@ -431,23 +500,22 @@ export class RealtimeListener {
         closeSocket();
         if (capture) await capture.flush();
         if (mode !== "rescue") return; // cancelled meanwhile
-        const span = gate.speaking ? gate.span(0.5, 0.5) : { from: 0, to: Infinity };
-        const wav = capture ? capture.wav(span.from, span.to) : null;
+        const { from, to } = rescueSpan();
+        const wav = capture && to > from ? capture.wav(from, to, RESCUE_MAX_SECONDS) : null;
         capture?.stop();
         const turnSeconds = seconds();
-        if (!wav) return finishTurn({ kind: "unclear", seconds: turnSeconds });
-        const outcome = await this.deps.transcribe(wav);
+        const outcome = wav ? await this.deps.transcribe(wav) : null;
         if (mode !== "rescue") return;
-        if (!outcome.ok) return finishTurn(sttFailure(outcome.status, turnSeconds));
-        const text = outcome.text.trim();
-        finishTurn(text ? { kind: "heard", text, seconds: turnSeconds } : { kind: "unclear", seconds: turnSeconds });
+        const text = outcome?.ok ? outcome.text.trim() : "";
+        const live = words();
+        if (text || live) return finishTurn({ kind: "heard", text: text || live, seconds: turnSeconds });
+        finishTurn(outcome && !outcome.ok ? sttFailure(outcome.status, turnSeconds) : { kind: "unclear", seconds: turnSeconds });
       };
 
       /** The socket can't carry this turn any more. `kind` (the error) decides how long live listening rests. */
       const fail = (kind: string | null) => {
         if (mode === "done" || mode === "rescue") return;
         if (kind) this.noteFailure(kind);
-        if (mode === "committing" && partial.trim()) return finishTurn({ kind: "heard", text: partial.trim(), seconds: seconds() });
         closeSocket();
         if (!spoke) return delegate();
         if (mode === "committing" || !gate.speaking) return void upload();
@@ -459,6 +527,7 @@ export class RealtimeListener {
         mode = "committing";
         if (capture) await capture.flush(); // the last few ms still go out through onChunk
         if (mode !== "committing") return;
+        endSample = capturedSamples;
         if (!open || !socket) return void upload(); // not connected yet: transcribe what we have
         try {
           // A tiny bit of silence carries the commit (an empty chunk isn't needed)
@@ -474,11 +543,29 @@ export class RealtimeListener {
         } catch {
           return void upload();
         }
-        commitTimer = window.setTimeout(() => {
+        // Wait for the final text, counting only once the socket has sent everything (a slow uplink queues
+        // her audio); no text in time → her captured turn is transcribed in one go
+        const sentAt = performance.now();
+        let drainedAt: number | null = null;
+        const waitForText = () => {
           if (mode !== "committing") return;
-          if (partial.trim()) finishTurn({ kind: "heard", text: partial.trim(), seconds: seconds() });
-          else void upload();
-        }, COMMIT_WAIT_MS);
+          const now = performance.now();
+          if ((socket?.bufferedAmount ?? 0) > 0) drainedAt = null;
+          else drainedAt ??= now;
+          if ((drainedAt !== null && now - drainedAt >= COMMIT_WAIT_MS) || now - sentAt >= COMMIT_MAX_WAIT_MS) return void upload();
+          commitTimer = window.setTimeout(waitForText, 250);
+        };
+        waitForText();
+      };
+
+      /** Has the server committed everything she said? (Then her turn can end without a round trip.) */
+      const allCommitted = () => !partial && lastCommitAt > -Infinity && !(gate.speaking && gate.lastVoiceAt > lastCommitAt);
+
+      /** Her turn is over (her pause, her tap, the cap): end it now, or commit what's still open first. */
+      const endTurn = () => {
+        if (mode !== "live") return;
+        if (allCommitted()) return finishWithWords();
+        void commitNow();
       };
 
       const check = (now: number) => {
@@ -487,10 +574,15 @@ export class RealtimeListener {
             if (now - startedAt > noSpeechTimeoutMs) finishTurn({ kind: "silence" });
             return;
           }
-          const quietFor = gate.speaking ? gate.silentFor(now) : now - lastPartialAt;
-          if (quietFor > localCommitMs || now - firstSpeechAt > MAX_UTTERANCE_MS) void commitNow();
+          // Her pause: the gate hears nothing and the server's words stopped changing (they arrive a little late)
+          const gateQuiet = gate.speaking ? gate.silentFor(now) > pauseMs : now - lastWordsAt > pauseMs;
+          const wordsQuiet = now - lastWordsAt > (gate.speaking ? pauseMs - WORDS_LAG_MS : pauseMs);
+          // A noisy room can keep the gate "hearing" her: once the server committed all her words, trust it (later)
+          const roomNoise =
+            !partial && segments.length > 0 && now - Math.max(lastWordsAt, lastCommitAt) > pauseMs + NOISY_ROOM_EXTRA_MS;
+          if ((gateQuiet && wordsQuiet) || roomNoise || now - firstSpeechAt > MAX_UTTERANCE_MS) endTurn();
         } else if (mode === "rescue" && !uploading) {
-          if (!gate.speaking || gate.silentFor(now) > rescueSilenceMs || now - firstSpeechAt > MAX_UTTERANCE_MS) void upload();
+          if (!gate.speaking || gate.silentFor(now) > pauseMs || now - firstSpeechAt > MAX_UTTERANCE_MS) void upload();
         }
       };
 
@@ -498,7 +590,7 @@ export class RealtimeListener {
       const finish = () => {
         if (mode === "live") {
           if (!spoke) return finishTurn({ kind: "silence" });
-          void commitNow();
+          endTurn();
         } else if (mode === "rescue") {
           void upload();
         }
@@ -508,6 +600,8 @@ export class RealtimeListener {
 
       const handlers: CaptureHandlers = {
         onChunk: (pcm) => {
+          if (mode === "done") return;
+          capturedSamples += pcm.length;
           if (!(mode === "live" || (mode === "committing" && !commitSent))) return;
           if (!open || !socket) return void queue.push(pcm);
           try {
@@ -520,18 +614,20 @@ export class RealtimeListener {
           if (mode === "done") return;
           onLevel?.(Math.min(1, rms * (whisper ? 30 : 15)));
           const now = performance.now();
-          if (gate.feed(rms, now, samples)) signalSpeech();
+          if (gate.feed(rms, now, samples)) signalSpeech("gate");
           check(now);
         },
       };
 
       const connect = async () => {
-        const claimed = await this.claimToken(() => mode !== "done");
-        if (mode === "done") return;
+        // Only a turn still streaming live takes the token: after her tap or a rescue upload it's kept for the next one
+        const claimed = await this.claimToken(() => mode === "live");
         if (!("token" in claimed)) {
-          this.tokenFailed(claimed.status);
-          return fail(null); // counted by tokenFailed
+          if (mode !== "done") this.tokenFailed(claimed.status);
+          if (mode === "live") fail(null); // counted by tokenFailed
+          return;
         }
+        if (mode !== "live") return this.keepToken(claimed, epoch);
         let ws: SocketLike;
         try {
           ws = this.deps.openSocket(realtimeUrl(claimed.token, whisper));
@@ -558,19 +654,26 @@ export class RealtimeListener {
           if (message.type === "partial") {
             if (mode !== "live" && mode !== "committing") return;
             const text = message.text.trim();
-            if (!text) return; // "nothing yet" / keepalive
-            partial = text;
-            lastPartialAt = performance.now();
-            signalSpeech();
-            onPartial?.(text);
+            if (!text) return; // "nothing yet" / a keepalive after a commit
+            if (text !== partial) {
+              partial = text; // keepalives repeat the open segment's words: only a change is news
+              lastWordsAt = performance.now();
+            }
+            signalSpeech("words");
+            showWords();
           } else if (message.type === "committed") {
+            // One segment of her turn (the server's VAD heard a pause, or our commit): keep it and keep listening
             const text = message.text.trim();
+            partial = "";
+            lastCommitAt = performance.now();
             if (text) {
               this.failures = 0;
-              return finishTurn({ kind: "heard", text, seconds: seconds() });
+              segments.push(text);
+              signalSpeech("words");
+              showWords();
             }
-            if (mode === "committing") return finishTurn(spoke ? { kind: "unclear", seconds: seconds() } : { kind: "silence" });
-            partial = ""; // the server's VAD committed only noise: keep listening
+            // An empty VAD commit was only noise; after our own commit, her turn is complete
+            if (mode === "committing") finishWithWords();
           } else if (message.type === "error") {
             fail(message.kind);
           }
@@ -579,17 +682,26 @@ export class RealtimeListener {
         ws.onclose = () => fail("closed");
       };
 
+      // The no-speech timeout counts from now, even while the capture is still starting
+      watchdog = window.setInterval(() => check(performance.now()), 250);
+      captureTimer = window.setTimeout(() => {
+        if (capture || mode === "done") return;
+        // The worklet is stuck loading (a stalled network): the batch Listener takes this turn; live rests a while
+        this.noteFailure("capture_timeout");
+        delegate();
+      }, CAPTURE_START_TIMEOUT_MS);
       this.deps.startCapture(context, stream, handlers).then(
         (started) => {
           if (mode === "done") return started.stop();
+          window.clearTimeout(captureTimer);
           capture = started;
-          // Timeouts still fire if the worklet goes quiet (iOS suspended the audio)
-          watchdog = window.setInterval(() => check(performance.now()), 250);
           void connect();
         },
         () => {
-          // The capture worklet can't run on this phone: the batch Listener from now on
-          this.off = true;
+          if (mode === "done") return;
+          // The capture worklet didn't start (it failed to load, or this phone can't run it): the batch
+          // Listener takes this turn, and live listening rests (longer each time it fails again)
+          this.noteFailure("capture");
           delegate();
         },
       );

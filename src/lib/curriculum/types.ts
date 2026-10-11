@@ -116,8 +116,16 @@ export type SoundGuide = {
   why: string;
   tipEn: string; // how to make the sound
   tipAr: string; // same tip in Darija
-  /** Minimal pairs or practice words */
+  /**
+   * Minimal pairs or practice words: real words/phrases only. They are what Hossam says and what the
+   * Lab's mic scores, so no respellings ("buh-NA-nuh") or glosses ("(a gift)") here — use `pairHints`.
+   */
   pairs: [string, string][];
+  /**
+   * Optional display-only help, same order and sides as `pairs`: how it sounds ("buh-NA-nuh", "PHO-to-graph")
+   * or which meaning. Never spoken and never scored.
+   */
+  pairHints?: [string | null, string | null][];
   practice: string[]; // short practice sentences
   /** IPA phonemes this sound covers (to map Azure phoneme scores), e.g. ["p", "b"] */
   phonemes: string[];

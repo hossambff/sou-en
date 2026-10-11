@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Listener, sttFailure, type ListenResult } from "./listener";
+import { turnPauseMs } from "./turn";
 
 function fakeTrack() {
   return { readyState: "live" as "live" | "ended", stop: vi.fn() };
@@ -131,7 +132,7 @@ describe("Listener", () => {
     mic.state.level = 0.2;
     await vi.advanceTimersByTimeAsync(1000);
     mic.state.level = 0;
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(turnPauseMs(false) + 500); // the turn ends after her pause
     return heard;
   }
 

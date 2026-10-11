@@ -6,7 +6,16 @@ import { queryOne } from "@/lib/db";
 import { getProfile, localHour, localToday, profileTimeZone } from "@/lib/learner";
 import { learnerUsesServerVoice } from "@/lib/tts";
 import { isNightHour } from "@/lib/time-of-day";
-import { DRILL_GOAL, KIND_INFO, dueLabel, getHomework, isVoiceKind, syncAutoHomework, type HomeworkItem } from "@/lib/homework";
+import {
+  DRILL_GOAL,
+  KIND_INFO,
+  dueLabel,
+  getHomework,
+  isVoiceKind,
+  shadowHomeworkHref,
+  syncAutoHomework,
+  type HomeworkItem,
+} from "@/lib/homework";
 import { learnerSpeechRate } from "@/app/drill/voice-prefs";
 import { NightTheme } from "@/components/night-theme";
 import { SpeakButton } from "@/components/speak-button";
@@ -104,6 +113,7 @@ export default async function HomeworkItemPage({ params }: PageProps<"/homework/
               serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
               speechRate={await learnerSpeechRate(user.id)}
               night={night}
+              heardNothing={Boolean(item.submission?.heardNothing)}
             />
           ) : (
             <HomeworkResult item={item} />
@@ -159,8 +169,8 @@ async function DrillTask({
   userId: string;
 }) {
   const done = Math.min(progress.done, progress.goal);
-  const mode = night ? "mode=night" : "";
-  let href = `/drill/shadow${mode ? `?${mode}` : ""}`;
+  // Shadow Me runs THIS item's unit phrases, and only tries on them count
+  let href = shadowHomeworkHref(item.id, night);
   if (item.kind === "words") {
     // Say It Back's due round can be short: with fewer than 5 due, her newest words make a full round
     const due = await queryOne<{ n: number }>(`select count(*)::int as n from vocab_item where user_id = $1 and due <= now()`, [userId]);
@@ -189,7 +199,9 @@ async function DrillTask({
         </ol>
         <p className="mt-3 text-sm text-ink-soft">
           {done === 0
-            ? "It counts by itself: every try in the drill is one step."
+            ? item.kind === "shadow"
+              ? "It counts by itself: every try on these phrases is one step."
+              : "It counts by itself: every try in the drill is one step."
             : "Nice! It finishes by itself when you reach the goal."}
         </p>
         <Link

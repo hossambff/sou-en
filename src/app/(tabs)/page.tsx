@@ -10,9 +10,12 @@ import { WeekRing } from "@/components/week-ring";
 import { QuickAsk } from "@/components/quick-ask";
 import { InstallHint } from "@/components/pwa/install-hint";
 import { HomeworkCard } from "@/components/homework-card";
-import { KIND_INFO, type HomeworkKind } from "@/lib/homework";
-import { queryOne } from "@/lib/db";
+import { KIND_INFO, homeworkBoard, isVoiceKind } from "@/lib/homework";
 import { getAssessmentStatus } from "@/lib/assessment/status";
+import { moveOffPassedUnit } from "@/lib/assessment/exam-server";
+
+/** Home may finish a waiting homework review in the background (after the page is sent). */
+export const maxDuration = 60;
 
 function greetingEmoji(hour: number) {
   if (hour >= 5 && hour < 12) return "☀️";
@@ -23,22 +26,25 @@ function greetingEmoji(hour: number) {
 
 export default async function HomePage() {
   const { user } = await requireLearner();
+  // If she's sitting on a unit she already passed (older data), move her on before anything reads it
+  await moveOffPassedUnit(user.id).catch(() => null);
   const profile = await getProfile(user.id);
   if (!profile) redirect("/onboarding");
 
   // One clock for the greeting, the big button's default mode and Today's plan: her own timezone
   const timeZone = profileTimeZone(profile);
-  const [dash, planContext, nextHomework, assessment] = await Promise.all([
+  // Homework first: completing the drill homework she has earned and topping up today's set happen
+  // here, so the plan, the points and the card below all see the same state. Never breaks Home.
+  const homework = await homeworkBoard(user.id).catch((error) => {
+    console.error("Homework board failed", error);
+    return null;
+  });
+  const [dash, planContext, assessment] = await Promise.all([
     getDashboard(user.id, profile.started_on, timeZone),
     getPlanContext(user.id, profile.started_on, timeZone),
-    queryOne<{ id: string; kind: HomeworkKind; title: string; title_ar: string | null }>(
-      `select id, kind, title, title_ar from homework
-        where user_id = $1 and status = 'assigned' and kind in ('speak', 'mission')
-        order by due_on, created_at limit 1`,
-      [user.id],
-    ),
     getAssessmentStatus(user.id).catch(() => null),
   ]);
+  const nextHomework = homework?.open.find((item) => isVoiceKind(item.kind)) ?? null;
   const month = monthOfJourney(profile.started_on);
   const level = levelFor(dash.points);
   const babyAge = babyAgeLabel(profile.baby_birthdate);
@@ -87,7 +93,7 @@ export default async function HomePage() {
           }}
         />
 
-        <HomeworkCard userId={user.id} />
+        <HomeworkCard board={homework} />
 
         <QuickAsk />
 

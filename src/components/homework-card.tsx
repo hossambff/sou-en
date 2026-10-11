@@ -1,23 +1,24 @@
 import Link from "next/link";
-import { KIND_INFO, dueLabel, homeworkBoard } from "@/lib/homework";
+import { after } from "next/server";
+import { KIND_INFO, dueLabel, reviewsToRetry, type HomeworkBoard } from "@/lib/homework";
+import { retryWaitingReviews } from "@/app/api/homework/review";
 
 /**
- * Home's homework card (server component). Completes drill homework she has earned, tops up her
- * current unit's set, and shows up to 2 open items, or "All done for today 🌱".
- * Never breaks Home: on any error it renders nothing.
+ * Home's homework card (server component). Home builds the board first (homeworkBoard: completes
+ * drill homework she has earned and tops up her current unit's set) so Today's plan and the points
+ * see the same state; this shows up to 2 open items, or "All done for today 🌱". Reviews left waiting
+ * (Claude was down) are retried in the background after the page is sent. Renders nothing without a board.
  */
-export async function HomeworkCard({ userId }: { userId: string }) {
-  let board: Awaited<ReturnType<typeof homeworkBoard>>;
-  try {
-    board = await homeworkBoard(userId);
-  } catch (error) {
-    console.error("Homework card failed", error);
-    return null;
-  }
+export function HomeworkCard({ board }: { board: HomeworkBoard | null }) {
   if (!board) return null;
+
+  const userId = board.profile.user_id;
+  const retry = reviewsToRetry(board.waiting);
+  if (retry.length > 0) after(() => retryWaitingReviews(userId, retry));
 
   const items = board.open.slice(0, 2);
   const freshFeedback = board.done.find((item) => item.day === board.today && item.feedback?.type === "coach");
+  const waiting = board.waiting[0];
 
   return (
     <section aria-labelledby="homework-card" className="rounded-3xl border border-line bg-card p-4 shadow-card animate-rise">
@@ -75,10 +76,10 @@ export async function HomeworkCard({ userId }: { userId: string }) {
           ✨ Hossam&apos;s feedback is ready ›
         </Link>
       ) : (
-        board.waiting.length > 0 && (
-          <p className="mt-2 text-xs text-ink-soft">
-            🎧 Hossam is listening to {board.waiting.length === 1 ? "your voice note" : `${board.waiting.length} voice notes`}
-          </p>
+        waiting && (
+          <Link href={`/homework/${waiting.id}`} className="mt-2 flex min-h-11 items-center text-xs text-ink-soft">
+            🎧 Hossam is listening to {board.waiting.length === 1 ? "your voice note" : `${board.waiting.length} voice notes`} ›
+          </Link>
         )
       )}
     </section>

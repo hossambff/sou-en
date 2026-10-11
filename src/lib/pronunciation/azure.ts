@@ -33,13 +33,32 @@ export type EngineOutcome =
   /** The service failed or isn't reachable (the caller may try the basic engine) */
   | { ok: false; reason: "error"; status: number };
 
-const AZURE_TIMEOUT_MS = 20_000;
+/** Short enough that Azure + the basic-engine fallback fit in /api/pronounce's maxDuration. */
+export const AZURE_TIMEOUT_MS = 9_000;
+/** After Azure fails (timeout, outage, refused), skip it this long so each tap doesn't wait for it again. */
+const AZURE_REST_MS = 60_000;
+let restingUntil = 0;
+
+/** True for a minute after Azure failed on this server instance (the caller uses the basic engine meanwhile). */
+export function azureResting(now = Date.now()) {
+  return now < restingUntil;
+}
+
+/** Tests only: forget earlier failures. */
+export function resetAzureRest() {
+  restingUntil = 0;
+}
+
+function failed(status: number): EngineOutcome {
+  restingUntil = Date.now() + AZURE_REST_MS;
+  return { ok: false, reason: "error", status };
+}
 
 /**
  * Azure Pronunciation Assessment (REST, short audio ≤ 30 s) on a 16 kHz mono 16-bit WAV.
  * Never throws.
  */
-export async function assessWithAzure(wav: ArrayBuffer, target: string): Promise<EngineOutcome> {
+export async function assessWithAzure(wav: ArrayBuffer, target: string, timeoutMs = AZURE_TIMEOUT_MS): Promise<EngineOutcome> {
   const key = process.env.AZURE_SPEECH_KEY?.trim();
   const region = azureRegion();
   if (!key || !region) return { ok: false, reason: "error", status: 501 };
@@ -54,21 +73,21 @@ export async function assessWithAzure(wav: ArrayBuffer, target: string): Promise
         "Pronunciation-Assessment": assessmentHeader(target),
       },
       body: wav,
-      signal: AbortSignal.timeout(AZURE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       console.error("Azure pronunciation failed", response.status, (await response.text().catch(() => "")).slice(0, 300));
-      return { ok: false, reason: "error", status: response.status };
+      return failed(response.status);
     }
     const data = (await response.json()) as AzureResponse;
     if (data.RecognitionStatus && data.RecognitionStatus !== "Success" && !/NoMatch|Silence|Babble/i.test(data.RecognitionStatus)) {
       console.error("Azure pronunciation status", data.RecognitionStatus);
-      return { ok: false, reason: "error", status: 502 };
+      return failed(502);
     }
     const result = mapAzure(data, target);
     return result ? { ok: true, result } : { ok: false, reason: "nothing" };
   } catch (error) {
     console.error("Azure pronunciation unreachable", error instanceof Error ? error.message : error);
-    return { ok: false, reason: "error", status: 0 };
+    return failed(0);
   }
 }

@@ -7,8 +7,9 @@ import { ClipRejectedError, saveClip } from "@/lib/audio-store";
 import { SOUND_IDS } from "@/lib/curriculum/types";
 import type { PronunciationResult } from "@/lib/pronunciation/types";
 import { homeworkPoints, isVoiceKind, saveSubmission, type HomeworkKind, type HomeworkStatus, type Submission } from "@/lib/homework";
-import { reviewHomework } from "../../review";
+import { REVIEW_BUDGET_MS, reviewHomework } from "../../review";
 
+/** Keep in step with REVIEW_BUDGET_MS (the review ends 50 s after the request starts). */
 export const maxDuration = 60;
 
 const body = z.object({
@@ -83,10 +84,12 @@ async function readBody(request: Request, userId: string) {
  * Hand in a voice-note homework (speak / mission): { clipId?, transcript?, seconds, pronunciation? }.
  * Idempotent per homework id: a retry after a timeout never saves twice or doubles the points; it
  * only (re)tries the review. The recording is saved first (points + speaking time count right away);
- * Hossam's review needs Claude and may stay pending — POST /api/homework/<id> retries it.
- * → 200 { id, status: "reviewed" | "pending", reason? } · 400 bad body · 404 · 409 drill homework
+ * Hossam's review needs Claude and may stay pending — POST /api/homework/<id> retries it. A note with
+ * no words in it comes back as "retake": the item is open again so she can record it once more.
+ * → 200 { id, status: "reviewed" | "pending" | "retake", reason? } · 400 bad body · 404 · 409 drill homework
  */
 export async function POST(request: Request, context: RouteContext<"/api/homework/[id]/submit">) {
+  const deadline = Date.now() + REVIEW_BUDGET_MS;
   const userId = await getLearnerUserId();
   if (!userId) return new Response("Unauthorized", { status: 401 });
   const { id } = await context.params;
@@ -130,7 +133,7 @@ export async function POST(request: Request, context: RouteContext<"/api/homewor
     }
   }
 
-  const outcome = await reviewHomework(id, userId).catch((error) => {
+  const outcome = await reviewHomework(id, userId, { deadline }).catch((error) => {
     console.error("Homework review crashed", error);
     return { status: "pending" as const, reason: "unavailable" as const };
   });

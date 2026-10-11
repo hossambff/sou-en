@@ -147,7 +147,7 @@ export function PracticeHub(props: {
               badge={props.openHomework > 0 ? String(props.openHomework) : undefined}
             />
             <Tile
-              href="/pronunciation"
+              href={mode === "normal" ? "/pronunciation" : `/pronunciation?mode=${mode}`}
               emoji="👄"
               title="Pronunciation Lab"
               ar="مختبر النطق"

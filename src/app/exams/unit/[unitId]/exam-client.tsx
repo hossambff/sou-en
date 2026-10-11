@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { sayScore, type ExamAnswer, type ExamTask } from "@/lib/assessment/exam";
@@ -10,6 +10,7 @@ import { useScreenWake } from "@/lib/screen-wake";
 import { newRunId } from "@/app/drill/drill-ui";
 import { Shell } from "../../_ui/badges";
 import { PrimaryButton, RepeatItem, SayItem, SpeakItem } from "../../_ui/items";
+import { noteScoringAttempt } from "../../_ui/retry-score";
 
 type UnitInfo = { id: string; index: number; title: string; titleAr: string; emoji: string; canDo: string; canDoAr: string };
 type Stage = "intro" | "part" | "task" | "leave" | "sending" | "error";
@@ -66,6 +67,13 @@ export function ExamClient(props: {
   const answers = useRef<ExamAnswer[]>([]);
   const examId = useRef<string | null>(null);
   const startedAt = useRef(0);
+  const stageRef = useRef<Stage>(stage);
+  /** An answer arrived while she was on the "Need to stop?" screen: what to do when she taps "Keep going" */
+  const parked = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    stageRef.current = stage;
+  }, [stage]);
 
   useScreenWake(stage === "part" || stage === "task" || stage === "sending");
 
@@ -88,10 +96,15 @@ export function ExamClient(props: {
   function done(answer: ExamAnswer) {
     answers.current = [...answers.current.filter((a) => a.taskId !== answer.taskId), answer];
     const next = index + 1;
-    if (next >= props.tasks.length) return void submit();
-    setIndex(next);
-    if (props.tasks[next].kind !== props.tasks[index].kind) openPart(next);
-    else setStage("task");
+    const proceed = () => {
+      if (next >= props.tasks.length) return void submit();
+      setIndex(next);
+      if (props.tasks[next].kind !== props.tasks[index].kind) openPart(next);
+      else setStage("task");
+    };
+    // She paused while the answer was saving: keep it, but stay on the pause screen
+    if (stageRef.current === "leave") parked.current = proceed;
+    else proceed();
   }
 
   async function submit() {
@@ -119,6 +132,7 @@ export function ExamClient(props: {
         return setStage("error");
       }
       if (!response.ok) throw new Error(String(response.status));
+      noteScoringAttempt(`/api/exams/${examId.current}`); // Hossam just tried: the result page needn't ask again at once
       router.replace(`/exams/result/${examId.current}`);
     } catch {
       setError("Couldn't reach Hossam. Your answers are still here: tap to try again.");
@@ -211,7 +225,16 @@ export function ExamClient(props: {
           </p>
           <p className="mt-3 max-w-xs text-sm text-ink-soft">The baby comes first. You can take the exam again whenever you like.</p>
         </div>
-        <PrimaryButton onClick={() => setStage(leavingFrom)}>Keep going</PrimaryButton>
+        <PrimaryButton
+          onClick={() => {
+            const resume = parked.current;
+            parked.current = null;
+            if (resume) resume();
+            else setStage(leavingFrom);
+          }}
+        >
+          Keep going
+        </PrimaryButton>
         <Link href="/exams" className="mt-2 block py-3 text-center text-sm text-ink-soft">
           Leave the exam
         </Link>

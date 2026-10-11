@@ -6,7 +6,7 @@
  * record one utterance as WAV for pronunciation scoring (drills, the Lab). iOS Safari 14.5+.
  */
 
-import { TARGET_RATE, chunksToWav } from "./wav";
+import { MAX_WAV_SECONDS, TARGET_RATE, chunksToWav } from "./wav";
 
 export const WORKLET_URL = "/worklets/pcm-capture.js";
 const CHUNK_MS = 100;
@@ -55,8 +55,11 @@ export type Capture = {
   /** Send what's buffered now; resolves once it arrived (or after a short wait) */
   flush(): Promise<void>;
   stop(): void;
-  /** The captured audio between two sample positions, as a 16 kHz mono WAV */
-  wav(fromSample?: number, toSample?: number): Blob;
+  /**
+   * The captured audio between two sample positions, as a 16 kHz mono WAV of at most `maxSeconds`
+   * (default 30 s, pronunciation scoring's limit; transcription passes more).
+   */
+  wav(fromSample?: number, toSample?: number, maxSeconds?: number): Blob;
 };
 
 export class PcmCapture implements Capture {
@@ -142,13 +145,13 @@ export class PcmCapture implements Capture {
     this.flushWaiters = [];
   }
 
-  wav(fromSample = 0, toSample = Infinity) {
-    return sliceToWav(this.chunks, fromSample, toSample);
+  wav(fromSample = 0, toSample = Infinity, maxSeconds = MAX_WAV_SECONDS) {
+    return sliceToWav(this.chunks, fromSample, toSample, maxSeconds);
   }
 }
 
-/** The captured chunks between two sample positions as one WAV. */
-export function sliceToWav(chunks: Int16Array[], fromSample = 0, toSample = Infinity): Blob {
+/** The captured chunks between two sample positions as one WAV (the first `maxSeconds` of that span). */
+export function sliceToWav(chunks: Int16Array[], fromSample = 0, toSample = Infinity, maxSeconds = MAX_WAV_SECONDS): Blob {
   const parts: Int16Array[] = [];
   let position = 0;
   for (const chunk of chunks) {
@@ -158,7 +161,7 @@ export function sliceToWav(chunks: Int16Array[], fromSample = 0, toSample = Infi
     if (end <= fromSample || start >= toSample) continue;
     parts.push(chunk.subarray(Math.max(0, fromSample - start), Math.min(chunk.length, toSample - start)));
   }
-  return chunksToWav(parts);
+  return chunksToWav(parts, maxSeconds);
 }
 
 /**

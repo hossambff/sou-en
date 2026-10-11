@@ -2,7 +2,7 @@ import "server-only";
 import { currentUnitFor, isCefr, nextUnit, type Cefr, type Unit } from "@/lib/curriculum";
 import { type Db, defaultDb, one, together } from "./db";
 import { examReady, examRetryAt } from "./exam";
-import { practiceCountSince } from "./exam-server";
+import { pendingExamFor, practiceCountSince } from "./exam-server";
 
 export type AssessmentStatus = {
   /** 'pending' = never taken (show the Home banner), 'skipped' = "do it later", 'done' */
@@ -14,9 +14,14 @@ export type AssessmentStatus = {
   unit: Unit;
   /** The unit after this one (undefined at the end of the course) */
   nextUnit: Unit | undefined;
-  /** She has practised this unit enough (2+ sessions/drills since it started) and isn't waiting out a retry */
+  /**
+   * She has practised this unit enough (2+ sessions/drills since it started), isn't waiting out a retry,
+   * hasn't passed it, and has no exam for it still waiting for Hossam's grade.
+   */
   unitExamReady: boolean;
-  /** Sessions/drills since the current unit started */
+  /** Her exam for the current unit that Hossam hasn't graded yet (null = none) */
+  unitExamPendingId: string | null;
+  /** Practice sessions/drills since the current unit started (see PRACTICE_ACTIVITIES) */
   practiceCount: number;
   /** After a failed attempt: when she may try again (null = now) */
   unitExamRetryAt: Date | null;
@@ -37,7 +42,7 @@ export async function getAssessmentStatus(userId: string, db: Db = defaultDb): P
   const level: Cefr = isCefr(profile?.cefr_level) ? profile.cefr_level : "A1";
   const unit = currentUnitFor(profile?.current_unit, level);
 
-  const [progress, lastExam, lastFail, placement] = await together(
+  const [progress, lastExam, lastFail, placement, pendingHere] = await together(
     db,
     () => one<{ status: string; started_at: Date }>(db, `select status, started_at from unit_progress where user_id = $1 and unit_id = $2`, [userId, unit.id]),
     () => one<{ id: string; unit_id: string; score: number | null; passed: boolean | null; status: string; at: Date }>(
@@ -58,6 +63,7 @@ export async function getAssessmentStatus(userId: string, db: Db = defaultDb): P
       `select status from placement_test where user_id = $1 and finished_at is not null order by finished_at desc limit 1`,
       [userId],
     ),
+    () => pendingExamFor(userId, unit.id, db),
   );
 
   // Practice counts from when this unit started (or the placement, or her first day)
@@ -72,7 +78,8 @@ export async function getAssessmentStatus(userId: string, db: Db = defaultDb): P
     level,
     unit,
     nextUnit: nextUnit(unit.id),
-    unitExamReady: examReady(practiceCount) && !retryAt && !passedCurrent,
+    unitExamReady: examReady(practiceCount) && !retryAt && !passedCurrent && !pendingHere,
+    unitExamPendingId: pendingHere?.id ?? null,
     practiceCount,
     unitExamRetryAt: retryAt,
     ...(lastExam

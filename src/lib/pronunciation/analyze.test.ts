@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { getSound } from "../curriculum";
 import {
+  VOICING_SOUNDS,
   basicResult,
+  forWhisper,
   mapAzure,
+  soundForPhonemeAt,
   soundsForWord,
   soundsToWork,
   syllables,
   verdictForAccuracy,
   type AttemptRow,
+  type AzureResponse,
 } from "./analyze";
 import { AZURE_ALL_OMITTED, AZURE_INITIAL_SILENCE, AZURE_NO_MATCH, AZURE_P_OMISSION, AZURE_SHORT_I, AZURE_TH_SLIPS } from "./azure-fixtures";
 
@@ -84,6 +88,103 @@ describe("mapAzure", () => {
     expect(result.score).toBe(80);
     expect(result.words.map((w) => w.word)).toEqual(["Hi", "there!"]);
     expect(result.accuracy).toBeUndefined();
+  });
+});
+
+describe("soundForPhonemeAt (Azure phonemes in word order)", () => {
+  const at = (phonemes: string[], index: number) => soundForPhonemeAt(phonemes, index)?.id;
+
+  it("t/d/k/g count as final sounds only at the end of the word (alone or in a final group)", () => {
+    const good = ["ɡ", "ʊ", "d"];
+    expect(at(good, 0)).toBeUndefined(); // the G that starts "good"
+    expect(at(good, 2)).toBe("final-consonants");
+    const walked = ["w", "ɔ", "k", "t"];
+    expect(at(walked, 2)).toBe("final-consonants");
+    expect(at(walked, 3)).toBe("final-consonants");
+    const street = ["s", "t", "ɹ", "i", "t"];
+    expect(at(street, 1)).toBeUndefined(); // inside "str", not at the end
+    expect(at(street, 4)).toBe("final-consonants");
+    expect(at(["k", "ʌ", "p"], 0)).toBeUndefined(); // the K of "cup"
+  });
+
+  it("s/z count as consonant groups only inside a group at the start or end of the word", () => {
+    expect(at(["s", "t", "ɹ", "i", "t"], 0)).toBe("clusters"); // street
+    expect(at(["m", "ʌ", "n", "θ", "s"], 4)).toBe("clusters"); // months
+    expect(at(["æ", "s", "k", "t"], 1)).toBe("clusters"); // asked
+    expect(at(["s", "w", "i", "t"], 0)).toBe("clusters"); // sweet
+    expect(at(["ɪ", "z"], 1)).toBeUndefined(); // "is": a single Z
+    expect(at(["s", "ɪ", "t"], 0)).toBeUndefined(); // "sit": a single S
+    expect(at(["m", "ɪ", "s", "t", "ɚ"], 2)).toBeUndefined(); // "mister": a group in the middle
+  });
+
+  it("every other phoneme keeps its guide wherever it is", () => {
+    expect(at(["θ", "ɪ", "ŋ", "k"], 0)).toBe("th-voiceless");
+    expect(at(["p", "ɑ", "ɹ", "k"], 0)).toBe("p-b");
+    expect(at(["ŋ"], 0)).toBeUndefined();
+  });
+
+  const one = (word: string, display: string, phonemes: [string, number][]): AzureResponse => ({
+    RecognitionStatus: "Success",
+    NBest: [
+      {
+        Display: display,
+        PronScore: 70,
+        Words: [{ Word: word, AccuracyScore: 65, ErrorType: "None", Phonemes: phonemes.map(([Phoneme, AccuracyScore]) => ({ Phoneme, AccuracyScore })) }],
+      },
+    ],
+  });
+
+  it("mapAzure: a weak G at the start of 'good' or a weak Z in 'is' points to no guide", () => {
+    const good = mapAzure(one("good", "Good.", [["ɡ", 65], ["ʊ", 90], ["d", 92]]), "Good.")!;
+    expect(good.sounds).not.toContain("final-consonants");
+    expect(good.words[0].sound).toBeUndefined();
+    const is = mapAzure(one("is", "Is.", [["ɪ", 90], ["z", 62]]), "Is.")!;
+    expect(is.sounds).not.toContain("clusters");
+    expect(is.tip).toBeNull();
+  });
+
+  it("mapAzure: a weak final T (slept) and a weak S starting a group (street) still point to their guides", () => {
+    const slept = mapAzure(one("slept", "Slept.", [["s", 90], ["l", 90], ["ɛ", 90], ["p", 88], ["t", 40]]), "Slept.")!;
+    expect(slept.sounds[0]).toBe("final-consonants");
+    const street = mapAzure(one("street", "Street.", [["s", 45], ["t", 90], ["ɹ", 90], ["i", 90], ["t", 90]]), "Street.")!;
+    expect(street.sounds[0]).toBe("clusters");
+  });
+
+  it("soundsToWork reads stored phonemes by position too", () => {
+    const now = new Date("2026-10-12T12:00:00Z");
+    const good = { word: "good", verdict: "unclear" as const, score: 70, phonemes: [{ phoneme: "ɡ", score: 40 }, { phoneme: "ʊ", score: 90 }, { phoneme: "d", score: 95 }] };
+    const list = soundsToWork(
+      [
+        { created_at: now, engine: "azure", sounds: [], words: [good] },
+        { created_at: now, engine: "azure", sounds: [], words: [good] },
+      ],
+      { now },
+    );
+    // Only the final D (95) says something about final sounds: nothing to work on
+    expect(list.find((s) => s.id === "final-consonants")).toBeUndefined();
+  });
+});
+
+describe("forWhisper", () => {
+  it("drops the voicing sounds (P/B, V/F, TH in this) from the sounds, the words and the tip, and marks it", () => {
+    const result = forWhisper({
+      engine: "azure",
+      score: 60,
+      heard: "fery bark think",
+      words: [
+        { word: "very", verdict: "mispronounced", score: 40, sound: "v-f" },
+        { word: "park", verdict: "unclear", score: 65, sound: "p-b" },
+        { word: "think", verdict: "unclear", score: 70, sound: "th-voiceless" },
+      ],
+      sounds: ["v-f", "p-b", "th-voiceless"],
+      tip: { en: getSound("v-f")!.tipEn, ar: getSound("v-f")!.tipAr },
+    });
+    expect(result.whisper).toBe(true);
+    expect(result.sounds).toEqual(["th-voiceless"]);
+    expect(result.tip?.en).toBe(getSound("th-voiceless")!.tipEn);
+    expect(result.words.map((w) => w.sound)).toEqual([undefined, undefined, "th-voiceless"]);
+    expect("sound" in result.words[0]).toBe(false);
+    for (const id of VOICING_SOUNDS) expect(getSound(id)).toBeDefined();
   });
 });
 

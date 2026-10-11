@@ -17,18 +17,21 @@ import {
 import {
   LEVEL_BANDS,
   LEVEL_MESSAGES,
+  NO_SPEAKING_CAP,
   PASS_CREDIT,
   SECTION_LIMITS,
   bandMid,
   blendSkills,
   buildPlacementResult,
   englishWordCount,
+  firstUnpassedUnit,
   listeningCredit,
   nextItem,
   nextRank,
   normalizeRubric,
   overallScore,
   pickItem,
+  placementIsForwardOnly,
   placementLevel,
   placementRetakeAt,
   placementUpdate,
@@ -43,6 +46,7 @@ import {
   wordsPerMinute,
   type BankItem,
   type HossamVerdict,
+  type PlacementAnswer,
   type PlacementBank,
   type SectionId,
   type Step,
@@ -336,6 +340,14 @@ describe("overall level", () => {
   it("is A1 with nothing measured", () => {
     expect(placementLevel({})).toEqual({ score: 0, level: "A1" });
   });
+
+  it("caps the level when the speaking part was skipped (no speaking evidence at all)", () => {
+    // Fluent in French, shy about speaking: great listening and vocabulary alone can't reach B1+ units
+    expect(placementLevel({ listening: 95, vocabulary: 90, grammar: 81, pronunciation: 90 }).level).toBe(NO_SPEAKING_CAP);
+    expect(placementLevel({ listening: 95, vocabulary: 90, grammar: 81, pronunciation: 90 }).score).toBe(LEVEL_BANDS[1].hi);
+    // A weaker learner stays where she is
+    expect(placementLevel({ listening: 10, vocabulary: 12 }).level).toBe("A1");
+  });
 });
 
 describe("buildPlacementResult", () => {
@@ -399,6 +411,36 @@ describe("buildPlacementResult", () => {
     expect(result.skills).toEqual({ listening: result.sections.listening });
     expect(result.provisional).toBe(false);
     expect(result.level).toBe("A2");
+  });
+
+  it("speaking skipped: capped at A2 and flagged, whatever listening and vocabulary say", () => {
+    const strongButSilent = {
+      listening: [pass("A1"), pass("A2"), pass("B1"), pass("B2"), miss("C1")],
+      vocab: [pass("A2"), pass("B1"), pass("B2"), miss("C1"), pass("B2"), miss("C1")],
+      repeat: [],
+      speaking: [],
+    };
+    const result = buildPlacementResult(strongButSilent);
+    expect(result.level).toBe(NO_SPEAKING_CAP);
+    expect(result.speakingSkipped).toBe(true);
+    expect(result.provisional).toBe(false); // nothing for Hossam to listen to
+    // Each speaking question skipped one by one: same story
+    const skippedEach = buildPlacementResult({
+      ...strongButSilent,
+      speaking: [miss("A2"), miss("A1")],
+      samples: [
+        { words: 0, seconds: 0 },
+        { words: 0, seconds: 0 },
+      ],
+    });
+    expect(skippedEach.speakingSkipped).toBe(true);
+    expect(["A1", "A2"]).toContain(skippedEach.level);
+  });
+
+  it("an answer that was recorded (even without words yet) is not 'skipped'", () => {
+    const waiting = buildPlacementResult({ ...beginner, speaking: [miss("A1")], samples: [{ words: 0, seconds: 30 }] });
+    expect(waiting.speakingSkipped).toBe(false);
+    expect(buildPlacementResult(beginner).speakingSkipped).toBe(false);
   });
 
   it("vocabulary only: a rough grammar estimate", () => {
@@ -470,6 +512,58 @@ describe("applying a placement", () => {
     expect(jump.skills.speaking).toBe(60);
   });
 
+  it("never lands on a unit she already passed: moves on to the next one she hasn't", () => {
+    const [u1, u2, u3] = course;
+    const first = placementUpdate(
+      { level: "A1", unitId: u2.id, skills: {} },
+      { level: "A1", skills: { speaking: 20 }, startUnit: u1.id },
+      false,
+      new Set([u1.id, u2.id]),
+    );
+    expect(first.unitId).toBe(u3.id);
+    // Forward-only from a passed unit, too
+    const forward = placementUpdate(
+      { level: "A1", unitId: u1.id, skills: {} },
+      { level: "A1", skills: {}, startUnit: u1.id },
+      true,
+      new Set([u1.id]),
+    );
+    expect(forward.unitId).toBe(u2.id);
+  });
+
+  it("moving past passed units raises her level with the unit she lands on", () => {
+    const a1 = course.filter((u) => u.level === "A1");
+    const next = placementUpdate({ level: "A1", unitId: null, skills: {} }, { level: "A1", skills: {}, startUnit: a1[0].id }, false, new Set(a1.map((u) => u.id)));
+    expect(next.unitId).toBe(firstUnitFor("A2").id);
+    expect(next.level).toBe("A2");
+  });
+
+  it("passed every unit from there: stays put (course complete)", () => {
+    const last = course[course.length - 1];
+    const next = placementUpdate({ level: last.level, unitId: last.id, skills: {} }, { level: "A1", skills: {}, startUnit: course[0].id }, true, new Set([last.id]));
+    expect(next.unitId).toBe(last.id);
+  });
+
+  it("firstUnpassedUnit", () => {
+    const [u1, u2, u3] = course;
+    expect(firstUnpassedUnit(u1.id, new Set())?.id).toBe(u1.id);
+    expect(firstUnpassedUnit(u1.id, new Set([u1.id, u2.id]))?.id).toBe(u3.id);
+    expect(firstUnpassedUnit(course[course.length - 1].id, new Set([course[course.length - 1].id]))).toBeUndefined();
+    expect(firstUnpassedUnit("nope", new Set())).toBeUndefined();
+    expect(firstUnpassedUnit(null, new Set())).toBeUndefined();
+  });
+
+  it("forward-only: after placing or progressing, unless the last placement was only a first guess", () => {
+    const base = { retake: false, progressed: false, previousProvisional: false, passedSincePrevious: false };
+    expect(placementIsForwardOnly(base)).toBe(false); // her first placement
+    expect(placementIsForwardOnly({ ...base, progressed: true })).toBe(true); // passed an exam before placing
+    expect(placementIsForwardOnly({ ...base, retake: true })).toBe(true); // a normal retake
+    // Last one skipped speaking / was never listened to: the new one may move her down…
+    expect(placementIsForwardOnly({ ...base, retake: true, previousProvisional: true })).toBe(false);
+    // …unless she has passed a unit since
+    expect(placementIsForwardOnly({ ...base, retake: true, previousProvisional: true, passedSincePrevious: true })).toBe(true);
+  });
+
   it("blendSkills mixes, keeps untouched skills and ignores junk", () => {
     expect(blendSkills({ speaking: 40, listening: 70 }, { speaking: 60, grammar: 30 }, 0.3)).toEqual({ speaking: 46, listening: 70, grammar: 30 });
     expect(blendSkills(null, { speaking: Number.NaN }, 0.5)).toEqual({});
@@ -497,5 +591,19 @@ describe("the real item bank", () => {
     }
     for (const item of LISTENING_ITEMS) expect(item.answer).toBeLessThan(item.options.length);
     for (const item of SPEAKING_PROMPTS) expect(item.expectedWords).toBeGreaterThan(0);
+  });
+
+  it("skipping the speaking part can't put her into B1 units on listening and vocabulary alone", () => {
+    const realBank: PlacementBank = { listening: LISTENING_ITEMS, vocab: VOCAB_ITEMS, repeat: REPEAT_ITEMS, speaking: SPEAKING_PROMPTS };
+    const answers: PlacementAnswer[] = [
+      ...LISTENING_ITEMS.map((i): PlacementAnswer => ({ section: "listening", itemId: i.id, choice: i.answer, replays: 0 })),
+      ...VOCAB_ITEMS.filter((i) => i.level !== "B2" && i.level !== "C1").map(
+        (i): PlacementAnswer => ({ section: "vocab", itemId: i.id, said: i.accepted[0], typed: false }),
+      ),
+    ];
+    const result = buildPlacementResult(stepsFromAnswers(realBank, answers));
+    expect(result.level).toBe("A2");
+    expect(result.speakingSkipped).toBe(true);
+    expect(getUnit(result.startUnit)?.level).toBe("A2");
   });
 });

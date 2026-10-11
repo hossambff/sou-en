@@ -7,14 +7,14 @@ export function basicConfigured() {
   return Boolean(process.env.ELEVENLABS_API_KEY);
 }
 
-const STT_TIMEOUT_MS = 20_000;
+export const STT_TIMEOUT_MS = 20_000;
 
 /**
  * No Azure: ElevenLabs batch Scribe forced to English, then a word-by-word comparison with the target.
  * Scribe quietly "fixes" accents ("slebt" → "slept"), so this only catches words that came out as a
  * different word or not at all. Never throws.
  */
-export async function assessBasic(audio: Blob, target: string): Promise<EngineOutcome> {
+export async function assessBasic(audio: Blob, target: string, timeoutMs = STT_TIMEOUT_MS): Promise<EngineOutcome> {
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) return { ok: false, reason: "error", status: 501 };
   const form = new FormData();
@@ -27,7 +27,7 @@ export async function assessBasic(audio: Blob, target: string): Promise<EngineOu
       method: "POST",
       headers: { "xi-api-key": apiKey },
       body: form,
-      signal: AbortSignal.timeout(STT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       console.error("Basic pronunciation STT failed", response.status, (await response.text().catch(() => "")).slice(0, 300));

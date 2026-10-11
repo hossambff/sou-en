@@ -76,6 +76,27 @@ describe("POST /api/placement/finish", () => {
     expect(saved.answers[0]).toMatchObject({ section: "listening", replays: 0 });
   });
 
+  it("a very long spoken answer is clipped, never a 400 that fails every retry", async () => {
+    const long = "and the baby is sleeping and the TV is on ".repeat(30); // > 1000 characters
+    const response = await post(finish.POST, {
+      id: ID,
+      answers: [
+        { section: "vocab", itemId: "v-a1-1", said: long, typed: false },
+        { section: "repeat", itemId: "r-a1-1", score: 104, engine: "basic", heard: long, sounds: ["h", "th", "r", "v", "p", "w", "a"] },
+        { section: "speaking", itemId: "s-a1-1", transcript: long.repeat(5), clipId: null, seconds: 200 },
+      ],
+      elapsedSeconds: 9000,
+    });
+    expect(response.status).toBe(200);
+    const saved = placement.savePlacement.mock.calls[0][0];
+    expect(saved.answers[0].said).toHaveLength(500);
+    expect(saved.answers[1]).toMatchObject({ score: 100, sounds: ["h", "th", "r", "v", "p"] });
+    expect(saved.answers[1].heard).toHaveLength(500);
+    expect(saved.answers[2].transcript).toHaveLength(4000);
+    expect(saved.answers[2].seconds).toBe(180);
+    expect(saved.elapsedSeconds).toBe(7200);
+  });
+
   it("keeps her own recording", async () => {
     clips.owned = new Set([CLIP]);
     await post(finish.POST, { id: ID, answers });
@@ -135,6 +156,17 @@ describe("POST /api/exams", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ id: ID, status: "scored", score: 80, passed: true, advancedTo: "a1-02" });
     expect(exams.saveExam.mock.calls[0][0].answers[1].clipId).toBeNull();
+  });
+
+  it("clips a long answer instead of rejecting the whole exam", async () => {
+    const response = await post(examsRoute.POST, {
+      ...body,
+      answers: [{ taskId: "say-0", kind: "say", said: "x".repeat(900) }, { ...body.answers[1], transcript: "word ".repeat(1200) }],
+    });
+    expect(response.status).toBe(200);
+    const saved = exams.saveExam.mock.calls[0][0];
+    expect(saved.answers[0].said).toHaveLength(500);
+    expect(saved.answers[1].transcript).toHaveLength(4000);
   });
 
   it("403 for a unit that isn't hers yet, 429 while resting after a fail", async () => {

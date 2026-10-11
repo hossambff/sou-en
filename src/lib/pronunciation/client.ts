@@ -7,7 +7,7 @@ export type AssessOutcome =
   | { ok: true; result: PronunciationResult }
   | { ok: false; reason: "unclear" | "limit" | "network" | "service"; status: number };
 
-/** Give up on one assessment after this long (counts as a network failure). */
+/** Give up on one assessment after this long (counts as a network failure). The server finishes within ~26 s. */
 const ASSESS_TIMEOUT_MS = 30_000;
 
 /**
@@ -19,6 +19,8 @@ export async function assessPronunciation(options: {
   target: string;
   source: PronunciationSource;
   seconds?: number;
+  /** Whisper mode: the server skips the voicing sounds and doesn't save the attempt */
+  mode?: "normal" | "whisper" | "night";
 }): Promise<AssessOutcome> {
   try {
     let audio: Blob;
@@ -35,6 +37,7 @@ export async function assessPronunciation(options: {
     form.append("target", options.target);
     form.append("source", options.source);
     if (options.seconds) form.append("seconds", String(options.seconds));
+    if (options.mode === "whisper") form.append("mode", "whisper");
     const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ASSESS_TIMEOUT_MS) : undefined;
     const response = await fetch("/api/pronounce", { method: "POST", body: form, signal });
     if (response.ok) return { ok: true, result: (await response.json()) as PronunciationResult };

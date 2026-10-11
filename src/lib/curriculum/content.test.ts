@@ -20,6 +20,7 @@ import {
   type SoundId,
 } from "./index";
 import { SCENARIOS } from "../scenarios";
+import { basicResult, soundsForWord, syllables } from "../pronunciation/analyze";
 
 const ARABIC = /[؀-ۿ]/;
 const hasArabic = (text: string) => text.trim().length > 0 && ARABIC.test(text);
@@ -159,11 +160,52 @@ describe("sounds", () => {
       for (const [a, b] of guide.pairs) {
         expect(a.trim(), guide.id).not.toBe("");
         expect(b.trim(), guide.id).not.toBe("");
-        expect(a, guide.id).not.toBe(b);
+        expect(a.toLowerCase(), guide.id).not.toBe(b.toLowerCase());
       }
       expect(guide.practice.length, guide.id).toBeGreaterThanOrEqual(2);
       expect(guide.practice.length, guide.id).toBeLessThanOrEqual(3);
     }
+  });
+
+  it("every scored target is plain words: what Hossam says and the Lab's mic scores", () => {
+    // Real words only: no respellings ("buh-NA-nuh"), stress capitals ("PHOtograph"), glosses ("(a gift)")
+    const WORDS = /^[A-Za-z]+(?:['’ ][A-Za-z]+)*$/;
+    const SENTENCE = /^[A-Za-z][A-Za-z ,.'’?!]*$/;
+    const oddCapitals = /[a-z][A-Z]|[A-Z]{2}/;
+    for (const guide of SOUND_GUIDES) {
+      for (const word of guide.pairs.flat()) {
+        expect(word, `${guide.id}: "${word}"`).toMatch(WORDS);
+        expect(oddCapitals.test(word), `${guide.id}: "${word}" has stress capitals`).toBe(false);
+        // The scorer agrees she said it perfectly when she says exactly it
+        expect(basicResult(word, word)?.score, `${guide.id}: "${word}"`).toBe(100);
+      }
+      for (const sentence of guide.practice) {
+        expect(sentence, `${guide.id}: "${sentence}"`).toMatch(SENTENCE);
+        expect(basicResult(sentence, sentence)?.score, `${guide.id}: "${sentence}"`).toBe(100);
+      }
+    }
+    // Letter-only respellings ("nife", "haf", "cood") look like words: every silent-letter item must really have one
+    for (const word of getSound("silent-letters")!.pairs.flat()) {
+      expect(soundsForWord(word), `silent-letters: "${word}"`).toContain("silent-letters");
+    }
+    // Word stress needs words long enough to have a stressed syllable
+    for (const word of getSound("word-stress")!.pairs.flat()) expect(syllables(word), word).toBeGreaterThanOrEqual(2);
+  });
+
+  it("pair hints are display-only extras that line up with the pairs", () => {
+    for (const guide of SOUND_GUIDES) {
+      if (!guide.pairHints) continue;
+      expect(guide.pairHints.length, guide.id).toBe(guide.pairs.length);
+      guide.pairHints.forEach((hints, index) => {
+        hints.forEach((hint, side) => {
+          if (hint === null) return;
+          expect(hint.trim(), guide.id).not.toBe("");
+          expect(hint.toLowerCase(), `${guide.id}: a hint must add something`).not.toBe(guide.pairs[index][side].toLowerCase());
+        });
+      });
+    }
+    // The guides that need them have them
+    for (const id of ["schwa", "word-stress", "silent-letters"] as const) expect(getSound(id)?.pairHints, id).toBeDefined();
   });
 
   it("maps each IPA phoneme to at most one guide", () => {

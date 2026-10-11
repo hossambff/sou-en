@@ -2,8 +2,10 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { requireLearner } from "@/lib/session";
-import { getUnit, isCefr, unitPosition } from "@/lib/curriculum";
+import { getProfile } from "@/lib/learner";
+import { currentUnitFor, getUnit, isCefr, unitPosition, type Cefr } from "@/lib/curriculum";
 import { CEFR_INFO } from "@/lib/progress";
+import { LEVEL_MESSAGES } from "@/lib/assessment/placement";
 import { loadPlacement } from "@/lib/assessment/placement-server";
 import { Card, LevelBadge, Shell, SkillBars } from "@/app/exams/_ui/badges";
 import { RetryScoreButton } from "@/app/exams/_ui/retry-score";
@@ -14,7 +16,7 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
   const { user } = await requireLearner();
   const { id } = await params;
   if (!z.uuid().safeParse(id).success) notFound();
-  const row = await loadPlacement(id, user.id);
+  const [row, profile] = await Promise.all([loadPlacement(id, user.id), getProfile(user.id)]);
   if (!row) notFound();
 
   const result = row.result;
@@ -31,7 +33,7 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
             الأجوبة ديالك محفوظين
           </p>
           <div className="w-full max-w-xs">
-            <RetryScoreButton url={`/api/placement/${row.id}`} label="Show my level" />
+            <RetryScoreButton url={`/api/placement/${row.id}`} label="Show my level" auto />
           </div>
         </div>
         <Link href="/" className="block py-3 text-center text-sm text-ink-soft">
@@ -41,10 +43,16 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
     );
   }
 
-  const level = result.level;
-  const unit = getUnit(result.applied?.unitId ?? result.startUnit);
+  /** What this test measured today */
+  const measured = result.level;
+  // What her course actually uses: what this placement applied (a retake never sends her back), or —
+  // when it wasn't applied (a newer placement, or she had moved on) — where she is now
+  const level: Cefr = result.applied?.level ?? (isCefr(profile?.cefr_level) ? profile.cefr_level : measured);
+  const unit = result.applied ? getUnit(result.applied.unitId) : currentUnitFor(profile?.current_unit, profile?.cefr_level);
   const position = unit ? unitPosition(unit.id) : null;
   const provisional = row.status === "pending";
+  // Without Hossam's own words the message is the template for the measured level: use the one for hers
+  const message = result.message.en === LEVEL_MESSAGES[measured]?.en ? LEVEL_MESSAGES[level] : result.message;
 
   return (
     <Shell>
@@ -59,6 +67,28 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
             {CEFR_INFO[level].ar}
           </p>
           <p className="mt-2 text-sm">{CEFR_INFO[level].canDo}</p>
+          {level !== measured && (
+            <p className="mt-2 text-xs text-ink-soft">
+              Today&apos;s check-in said {measured}. Your course stays at {level}: your progress is kept 💛
+              <span className="ar mt-1 block" dir="rtl">
+                اختبار اليوم عطا {measured}. الكورس ديالك كيبقى ف {level}، والتقدم ديالك محفوظ
+              </span>
+            </p>
+          )}
+          {result.speakingSkipped && (
+            <div className="mt-4 rounded-2xl bg-saffron-soft p-3 text-left text-sm">
+              <p>
+                <span aria-hidden>🎙️</span> You skipped the speaking part, so this is a careful first guess. Take the test again with the speaking part
+                whenever you like: it shows where you really start.
+              </p>
+              <p className="ar mt-1 text-ink-soft" dir="rtl">
+                دوزتي جزء الهضرة، داكشي علاش هادا غير تقدير أولي. عاودي الاختبار مع الهضرة ملي تبغي باش نعرفو فين تبداي بصح.
+              </p>
+              <Link href="/placement" className="mt-3 block rounded-2xl border border-line bg-card py-3 text-center font-medium">
+                Take it again with speaking · ~8 min
+              </Link>
+            </div>
+          )}
           {provisional && (
             <div className="mt-4 rounded-2xl bg-saffron-soft p-3 text-left text-sm">
               <p>
@@ -67,7 +97,7 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
               <p className="ar mt-1 text-ink-soft" dir="rtl">
                 هادا تقدير أولي. حسام غادي يسمع للهضرة ديالك مزيان من بعد.
               </p>
-              <RetryScoreButton url={`/api/placement/${row.id}`} />
+              <RetryScoreButton url={`/api/placement/${row.id}`} auto />
             </div>
           )}
         </header>
@@ -79,10 +109,10 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
             </span>
             <div className="min-w-0">
               <p className="text-sm font-medium">From Hossam</p>
-              <p className="mt-1">{result.message.en}</p>
-              {result.message.ar && (
+              <p className="mt-1">{message.en}</p>
+              {message.ar && (
                 <p className="ar mt-2 text-ink-soft" dir="rtl">
-                  {result.message.ar}
+                  {message.ar}
                 </p>
               )}
             </div>

@@ -2,7 +2,7 @@ import "server-only";
 import { z } from "zod";
 import { query, queryOne } from "@/lib/db";
 import { loadClip } from "@/lib/audio-store";
-import { structured } from "@/lib/claude";
+import { ClaudeRefusedError, ClaudeUnavailableError, structured } from "@/lib/claude";
 import { getUnit } from "@/lib/curriculum";
 import { getProfile } from "@/lib/learner";
 import { DAILY_STT_LIMIT, bumpUsage, getUsage } from "@/lib/usage";
@@ -10,6 +10,7 @@ import {
   homeworkPoints,
   normalizeCoachFeedback,
   pronunciationNotes,
+  resetEmptySubmission,
   type HomeworkKind,
   type HomeworkPayload,
   type Submission,
@@ -59,20 +60,49 @@ nextTip: one concrete, doable thing, never generic ("speak more").
 Tone: calm, warm and a little witty, like a supportive big brother. No guilt.`;
 
 const STT_MODEL = process.env.ELEVENLABS_STT_MODEL ?? "scribe_v2";
-const STT_TIMEOUT_MS = 20_000;
-/** The review must finish well inside the route's maxDuration: 2 tries × 25 s. */
-const REVIEW_TIMEOUT_MS = 25_000;
 
-/**
- * Server-side transcription of her saved clip (when the phone couldn't transcribe).
- * null = not attempted (no key, daily limit, ElevenLabs down): a later retry may try again.
- */
-async function transcribeClip(clipId: string, userId: string): Promise<string | null> {
+// ── Time budget ─────────────────────────────────────────────────────────────
+// The submit and retry routes have maxDuration = 60 s. Everything the review does (server speech-to-
+// text, then Claude) must end before REVIEW_BUDGET_MS from the start of the request, leaving room for
+// the upload and the saves. If the platform still kills a run, its claim expires after CLAIM_TTL_SECONDS
+// (longer than any review can legally run, never longer than the route), so a retry can take over.
+
+/** Review deadline, counted from the start of the request. */
+export const REVIEW_BUDGET_MS = 50_000;
+/** Server speech-to-text gets at most this long. */
+const STT_TIMEOUT_MS = 20_000;
+/** One Claude attempt gets at most this long; a second attempt runs only if MIN_CLAUDE_MS are left. */
+const CLAUDE_TRY_MS = 25_000;
+const MIN_CLAUDE_MS = 10_000;
+const MIN_STT_MS = 5_000;
+/** A pause before the second Claude attempt (overloaded / rate-limited answers come back fast). */
+const RETRY_PAUSE_MS = 1_000;
+/** A review claim older than this is from a run that died: another one may start. */
+export const CLAIM_TTL_SECONDS = 60;
+/** Background retries (Home card, opening the item) wait this long after the last attempt. */
+export const AUTO_RETRY_GAP_SECONDS = 5 * 60;
+
+/** How long the next step may take before `deadline` (0 = no time left for it). */
+export function stepTimeout(deadline: number, cap: number, reserve = 0, now = Date.now()) {
+  return Math.max(0, Math.min(cap, deadline - now - reserve));
+}
+
+type SttResult =
+  /** What the clip says ("" = it has no words in it) */
+  | { kind: "text"; text: string }
+  /** Can't transcribe now (daily limit, ElevenLabs down or slow, no time left): a later retry may */
+  | { kind: "later" }
+  /** Nothing on this server can transcribe a clip (no ELEVENLABS_API_KEY) */
+  | { kind: "never" };
+
+/** Server-side transcription of her saved clip (when the phone couldn't transcribe). */
+async function transcribeClip(clipId: string, userId: string, timeoutMs: number): Promise<SttResult> {
   const apiKey = process.env.ELEVENLABS_API_KEY;
-  if (!apiKey) return null;
-  if ((await getUsage("stt_calls")) >= DAILY_STT_LIMIT) return null;
+  if (!apiKey) return { kind: "never" };
+  if (timeoutMs < MIN_STT_MS) return { kind: "later" };
+  if ((await getUsage("stt_calls")) >= DAILY_STT_LIMIT) return { kind: "later" };
   const clip = await loadClip(clipId);
-  if (!clip || clip.user_id !== userId) return "";
+  if (!clip || clip.user_id !== userId) return { kind: "text", text: "" };
   const form = new FormData();
   form.append("model_id", STT_MODEL);
   form.append("file", new Blob([new Uint8Array(clip.data)], { type: clip.mime }), clip.mime.includes("mp4") ? "homework.m4a" : "homework.webm");
@@ -82,13 +112,13 @@ async function transcribeClip(clipId: string, userId: string): Promise<string | 
       method: "POST",
       headers: { "xi-api-key": apiKey },
       body: form,
-      signal: AbortSignal.timeout(STT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) return null;
+    if (!response.ok) return { kind: "later" };
     const data = (await response.json()) as { text?: string };
-    return (data.text ?? "").trim();
+    return { kind: "text", text: (data.text ?? "").trim() };
   } catch {
-    return null;
+    return { kind: "later" };
   } finally {
     await bumpUsage("stt_calls", 1).catch(() => {});
   }
@@ -98,34 +128,68 @@ function wordCount(text: string) {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
-export type ReviewOutcome = { status: "reviewed" } | { status: "pending"; reason: "no-transcript" | "unavailable" };
+export type ReviewOutcome =
+  | { status: "reviewed" }
+  /**
+   * Still waiting for Hossam. no-transcript: the clip can't be transcribed right now; unavailable:
+   * Claude is down or out of time; busy: another review is running or one was tried moments ago.
+   */
+  | { status: "pending"; reason: "no-transcript" | "unavailable" | "busy" }
+  /** The voice note had no words in it: the item is open again so she can record it once more */
+  | { status: "retake"; reason: "no-speech" };
 
 /**
  * Hossam reviews a submitted voice note (speak / mission) with Claude. Safe to call again (retry):
  * one review at a time (claim), fills a missing transcript from the saved clip first, and does
- * nothing once reviewed. If Claude is unavailable the submission stays 'submitted' (pending).
+ * nothing once reviewed. If Claude is unavailable the submission stays 'submitted' (pending); if the
+ * note turns out to have no words, it goes back to 'assigned' (retake) so she can record it again.
+ *
+ * `deadline` (ms timestamp): when the review must be over; pass the request's start + REVIEW_BUDGET_MS.
+ * `auto`: a background retry, which only runs if nothing was tried in the last AUTO_RETRY_GAP_SECONDS.
  */
-export async function reviewHomework(id: string, userId: string): Promise<ReviewOutcome> {
+export async function reviewHomework(
+  id: string,
+  userId: string,
+  options: { deadline?: number; auto?: boolean } = {},
+): Promise<ReviewOutcome> {
+  const deadline = options.deadline ?? Date.now() + REVIEW_BUDGET_MS;
+  // review_started_at = when the last review attempt began (kept afterwards: it paces the retries)
   const claimed = await queryOne<{ id: string }>(
     `update homework set review_started_at = now()
       where id = $1 and user_id = $2 and status = 'submitted'
-        and (review_started_at is null or review_started_at < now() - interval '2 minutes')
+        and (review_started_at is null or review_started_at < now() - make_interval(secs => $3::int))
       returning id`,
-    [id, userId],
+    [id, userId, options.auto ? AUTO_RETRY_GAP_SECONDS : CLAIM_TTL_SECONDS],
   );
   if (!claimed) {
     const current = await queryOne<{ status: string }>(`select status from homework where id = $1 and user_id = $2`, [id, userId]);
     if (!current) throw new Error("Homework not found");
-    return current.status === "reviewed" ? { status: "reviewed" } : { status: "pending", reason: "unavailable" };
+    if (current.status === "reviewed") return { status: "reviewed" };
+    if (current.status === "submitted") return { status: "pending", reason: "busy" };
+    return { status: "retake", reason: "no-speech" };
   }
-  try {
-    return await reviewClaimed(id, userId);
-  } finally {
-    await query(`update homework set review_started_at = null where id = $1`, [id]).catch(() => {});
-  }
+  return reviewClaimed(id, userId, deadline);
 }
 
-async function reviewClaimed(id: string, userId: string): Promise<ReviewOutcome> {
+/**
+ * Background retries of reviews left pending (Claude was down, the daily limit, no time): at most
+ * one runs per call, oldest first, each still protected by the claim. Never throws.
+ */
+export async function retryWaitingReviews(userId: string, ids: string[]) {
+  const deadline = Date.now() + REVIEW_BUDGET_MS;
+  for (const id of ids.slice(0, 3)) {
+    try {
+      const outcome = await reviewHomework(id, userId, { auto: true, deadline });
+      if (!(outcome.status === "pending" && outcome.reason === "busy")) return outcome;
+    } catch (error) {
+      console.error("Homework review auto-retry failed", error);
+      return null;
+    }
+  }
+  return null;
+}
+
+async function reviewClaimed(id: string, userId: string, deadline: number): Promise<ReviewOutcome> {
   const row = await queryOne<{
     kind: HomeworkKind;
     status: string;
@@ -140,17 +204,28 @@ async function reviewClaimed(id: string, userId: string): Promise<ReviewOutcome>
   );
   if (!row) throw new Error("Homework not found");
   if (row.status === "reviewed") return { status: "reviewed" };
-  if (!row.submission) return { status: "pending", reason: "no-transcript" };
 
-  let submission = row.submission;
-  if (!submission.transcript.trim() && submission.clipId && !submission.sttTried) {
-    const transcript = await transcribeClip(submission.clipId, userId);
-    if (transcript !== null) {
-      submission = { ...submission, transcript, sttTried: true };
-      await query(`update homework set submission = $3 where id = $1 and user_id = $2`, [id, userId, JSON.stringify(submission)]);
+  let submission = row.submission ?? { transcript: "", clipId: null, seconds: 0 };
+  if (!submission.transcript.trim()) {
+    // Nothing to read yet: transcribe the clip once. No words in it (or no way to ever transcribe it)
+    // → she records it again, instead of "Hossam is listening" forever.
+    let heardNothing = Boolean(submission.sttTried) || !submission.clipId;
+    if (!heardNothing && submission.clipId) {
+      const stt = await transcribeClip(submission.clipId, userId, stepTimeout(deadline, STT_TIMEOUT_MS, MIN_CLAUDE_MS));
+      if (stt.kind === "later") return { status: "pending", reason: "no-transcript" };
+      if (stt.kind === "text" && stt.text) {
+        submission = { ...submission, transcript: stt.text, sttTried: true };
+        await query(`update homework set submission = $3 where id = $1 and user_id = $2`, [id, userId, JSON.stringify(submission)]);
+      } else {
+        heardNothing = true;
+      }
+    }
+    if (heardNothing) {
+      if (await resetEmptySubmission(id, userId)) return { status: "retake", reason: "no-speech" };
+      const now = await queryOne<{ status: string }>(`select status from homework where id = $1 and user_id = $2`, [id, userId]);
+      return now?.status === "reviewed" ? { status: "reviewed" } : { status: "pending", reason: "no-transcript" };
     }
   }
-  if (!submission.transcript.trim()) return { status: "pending", reason: "no-transcript" };
 
   const profile = await getProfile(userId);
   const unit = getUnit(row.unit_id);
@@ -191,15 +266,7 @@ async function reviewClaimed(id: string, userId: string): Promise<ReviewOutcome>
 
   let raw: z.infer<typeof reviewSchema>;
   try {
-    raw = await structured({
-      schema: reviewSchema,
-      instructions: INSTRUCTIONS,
-      prompt,
-      effort: "low",
-      maxTokens: 4000,
-      timeoutMs: REVIEW_TIMEOUT_MS,
-      maxRetries: 1,
-    });
+    raw = await askClaude(prompt, deadline);
   } catch (error) {
     console.error("Homework review failed", error);
     return { status: "pending", reason: "unavailable" };
@@ -208,6 +275,7 @@ async function reviewClaimed(id: string, userId: string): Promise<ReviewOutcome>
   const feedback = normalizeCoachFeedback(raw, pronunciation);
   const points = homeworkPoints(row.kind, feedback.score);
   // The bonus for a good score lands on the same 'homework' coach_session row written at submission
+  // (that row is the only place the homework's points count)
   await queryOne(
     `with done as (
        update homework set status = 'reviewed', feedback = $3::jsonb, score = $4, points = $5
@@ -220,4 +288,33 @@ async function reviewClaimed(id: string, userId: string): Promise<ReviewOutcome>
     [id, userId, JSON.stringify(feedback), feedback.score, points],
   );
   return { status: "reviewed" };
+}
+
+/** Claude's review within the deadline: up to 2 attempts, the second only if there's time for it. */
+async function askClaude(prompt: string, deadline: number) {
+  let failure: unknown = new Error("No time left for the review");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      if (stepTimeout(deadline, CLAUDE_TRY_MS, RETRY_PAUSE_MS) < MIN_CLAUDE_MS) break;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_PAUSE_MS));
+    }
+    const timeoutMs = stepTimeout(deadline, CLAUDE_TRY_MS);
+    if (timeoutMs < MIN_CLAUDE_MS) break;
+    try {
+      return await structured({
+        schema: reviewSchema,
+        instructions: INSTRUCTIONS,
+        prompt,
+        effort: "low",
+        maxTokens: 4000,
+        timeoutMs,
+        maxRetries: 0,
+      });
+    } catch (error) {
+      // No key / daily limit / a refusal won't change on a second try
+      if (error instanceof ClaudeUnavailableError || error instanceof ClaudeRefusedError) throw error;
+      failure = error;
+    }
+  }
+  throw failure;
 }

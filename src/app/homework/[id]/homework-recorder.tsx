@@ -12,8 +12,12 @@ import { WordChips, scoreTone } from "./word-chips";
 
 type Bilingual = { en: string; ar: string };
 type Take = { blob: Blob; seconds: number; transcript: string };
-type Saved = { clipId: string | null; transcript: string };
+/** heardNothing: the speech-to-text answered, and there were no words in the recording */
+type Saved = { clipId: string | null; transcript: string; heardNothing: boolean };
 type Phase = "task" | "recording" | "review" | "sending" | "error";
+/** retake: the way forward is a new recording, not sending this one again */
+type Problem = { message: Bilingual; retake?: boolean };
+type StartResult = "ok" | "busy" | "mic" | "unsupported";
 type Warm =
   | { state: "idle" }
   | { state: "recording" }
@@ -26,9 +30,24 @@ const WARMUP_MAX_SECONDS = 12;
 /** She can finish her sentence after the suggested length; the recorder stops for good after this grace. */
 const GRACE_SECONDS = 15;
 
+/** Shorter than this is a slip of the finger, not an answer. */
+const MIN_TAKE_SECONDS = 2;
+
 const MIC_HELP: Bilingual = {
   en: "Hossam can't hear you yet. Please allow the microphone for this app, then try again.",
   ar: "حسام مازال ما كيسمعكش. عطي الإذن للميكرو، ومن بعد عاودي.",
+};
+const MIC_LOST: Bilingual = {
+  en: "The microphone stopped (maybe a call or another app took it). Tap to try again.",
+  ar: "الميكرو تقطع (يمكن شي عيطة ولا شي تطبيق خداه). ضغطي وعاودي.",
+};
+const NO_RECORDING: Bilingual = {
+  en: "This browser can't record audio. Try opening Sou Coach in Safari or Chrome.",
+  ar: "هاد المتصفح ما كيسجلش الصوت. جربي Safari ولا Chrome.",
+};
+const NO_WORDS: Bilingual = {
+  en: "I couldn't hear any words in that one. Record it again, a little closer to the phone 💛",
+  ar: "ما سمعت حتى كلمة فهادا. عاودي سجلي، قربي شوية من التيليفون 💛",
 };
 
 type BrowserRecognition = {
@@ -77,19 +96,21 @@ async function saveTake(take: Take, serverStt: boolean): Promise<Saved> {
     return null;
   };
   const transcribe = async () => {
-    if (!serverStt) return take.transcript;
+    const fallback = { text: take.transcript, heardNothing: false };
+    if (!serverStt) return fallback;
     try {
       const form = new FormData();
       form.append("audio", take.blob, name);
       const response = await fetch("/api/stt", { method: "POST", body: form });
-      if (!response.ok) return take.transcript;
-      return ((await response.json()) as { text: string }).text || take.transcript;
+      if (!response.ok) return fallback;
+      const text = (((await response.json()) as { text?: string }).text ?? "").trim();
+      return { text: text || take.transcript, heardNothing: !text && !take.transcript.trim() };
     } catch {
-      return take.transcript;
+      return fallback;
     }
   };
-  const [clipId, transcript] = await Promise.all([upload(), transcribe()]);
-  return { clipId, transcript };
+  const [clipId, heard] = await Promise.all([upload(), transcribe()]);
+  return { clipId, transcript: heard.text, heardNothing: heard.heardNothing };
 }
 
 /** One mic for the warm-up and the answer: MediaRecorder + level meter + timer (+ the phone's recogniser). */
@@ -120,14 +141,37 @@ function useRecorder() {
     [],
   );
 
-  /** Call inside a tap: asks for the mic once (a double tap shares the same request). */
+  /** Lets go of the mic and the level meter (the next prepare() asks for a fresh mic). */
+  function release() {
+    stream.current?.getTracks().forEach((track) => track.stop());
+    stream.current = null;
+    context.current?.close().catch(() => {});
+    context.current = null;
+    analyser.current = null;
+  }
+
+  /**
+   * Call inside a tap: asks for the mic once (a double tap shares the same request). A stream whose
+   * track ended (a phone call or Siri took the mic, iOS stopped it in the background) can't record any
+   * more: it is replaced by a fresh one.
+   */
   function prepare() {
     preparing.current ??= (async () => {
       try {
+        const live = stream.current?.active && stream.current.getAudioTracks().some((track) => track.readyState === "live");
+        if (stream.current && !live) release();
+        if (context.current?.state === "closed") {
+          context.current = null;
+          analyser.current = null;
+        }
         if (!stream.current) {
           stream.current = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           });
+          // A new stream needs a new meter source
+          context.current?.close().catch(() => {});
+          context.current = null;
+          analyser.current = null;
         }
         if (!context.current) {
           context.current = new AudioContext();
@@ -147,15 +191,19 @@ function useRecorder() {
     return preparing.current;
   }
 
-  /** Starts recording; `onDone` gets the take when it stops (tap or time). False if this browser can't record. */
-  function start(options: { maxSeconds: number; listenAlong: boolean; onDone: (take: Take) => void }) {
-    if (!stream.current || recorder.current?.state === "recording") return false;
+  /**
+   * Starts recording; `onDone` gets the take when it stops (tap or time). "mic": the mic couldn't start
+   * (it's let go, so the next tap asks for a fresh one); "unsupported": this browser can't record.
+   */
+  function start(options: { maxSeconds: number; listenAlong: boolean; onDone: (take: Take) => void }): StartResult {
+    if (recorder.current?.state === "recording") return "busy";
+    if (!stream.current) return "mic";
     const mimeType = pickMime();
     let rec: MediaRecorder;
     try {
       rec = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
     } catch {
-      return false;
+      return "unsupported";
     }
     const chunks: Blob[] = [];
     let heard = "";
@@ -195,7 +243,16 @@ function useRecorder() {
       }
     }
 
-    rec.start(250);
+    try {
+      rec.start(250);
+    } catch {
+      // The stream died between prepare() and now (or the mic is busy): never leave the button dead
+      rec.onstop = null;
+      recognition.current?.abort();
+      recognition.current = null;
+      release();
+      return "mic";
+    }
     recorder.current = rec;
     setElapsed(0);
     timer.current = window.setInterval(() => {
@@ -214,7 +271,7 @@ function useRecorder() {
       meter.current = requestAnimationFrame(pump);
     };
     meter.current = requestAnimationFrame(pump);
-    return true;
+    return "ok";
   }
 
   function stop() {
@@ -246,13 +303,16 @@ export function HomeworkRecorder(props: {
   serverStt: boolean;
   speechRate: number;
   night: boolean;
+  /** Her last voice note for this item had no words in it: ask gently for a new one */
+  heardNothing?: boolean;
 }) {
   const router = useRouter();
   const mic = useRecorder();
   const [phase, setPhase] = useState<Phase>("task");
   const [take, setTake] = useState<(Take & { url: string }) | null>(null);
   const [typed, setTyped] = useState("");
-  const [error, setError] = useState<Bilingual | null>(null);
+  const [error, setError] = useState<Problem | null>(null);
+  const [noWords, setNoWords] = useState(Boolean(props.heardNothing));
   const [reading, setReading] = useState(false);
   const [warm, setWarm] = useState<Warm>({ state: "idle" });
   const speaker = useRef<Speaker | null>(null);
@@ -301,6 +361,14 @@ export function HomeworkRecorder(props: {
   async function startWarmup() {
     if (!props.warmup) return;
     quiet();
+    try {
+      await warmup(props.warmup);
+    } catch {
+      setWarm({ state: "failed", message: MIC_LOST });
+    }
+  }
+
+  async function warmup(sentence: string) {
     if (!(await mic.prepare())) return setWarm({ state: "failed", message: MIC_HELP });
     const started = mic.start({
       maxSeconds: WARMUP_MAX_SECONDS,
@@ -309,21 +377,31 @@ export function HomeworkRecorder(props: {
         setWarm({ state: "checking" });
         const outcome = await assessPronunciation({
           audio: recording.blob,
-          target: props.warmup!,
+          target: sentence,
           source: "homework",
           seconds: Math.max(1, Math.round(recording.seconds)),
         });
         setWarm(outcome.ok ? { state: "done", result: outcome.result } : { state: "failed", message: warmupMessage(outcome.reason) });
       },
     });
-    setWarm(started ? { state: "recording" } : { state: "failed", message: { en: "This browser can't record audio.", ar: "هاد المتصفح ما كيسجلش الصوت." } });
+    if (started === "busy") return;
+    setWarm(started === "ok" ? { state: "recording" } : { state: "failed", message: started === "mic" ? MIC_LOST : NO_RECORDING });
   }
 
   async function startAnswer() {
     quiet();
     setError(null);
+    try {
+      await answer();
+    } catch {
+      setError({ message: MIC_LOST });
+      setPhase("error");
+    }
+  }
+
+  async function answer() {
     if (!(await mic.prepare())) {
-      setError(MIC_HELP);
+      setError({ message: MIC_HELP });
       return setPhase("error");
     }
     const started = mic.start({
@@ -335,10 +413,12 @@ export function HomeworkRecorder(props: {
         setPhase("review");
       },
     });
-    if (!started) {
-      setError({ en: "This browser can't record audio. Try opening Sou Coach in Safari or Chrome.", ar: "هاد المتصفح ما كيسجلش الصوت. جربي Safari ولا Chrome." });
+    if (started === "busy") return;
+    if (started !== "ok") {
+      setError({ message: started === "mic" ? MIC_LOST : NO_RECORDING });
       return setPhase("error");
     }
+    setNoWords(false);
     setPhase("recording");
   }
 
@@ -351,7 +431,7 @@ export function HomeworkRecorder(props: {
   }
 
   async function send() {
-    if (!take) return;
+    if (!take || (take.seconds < MIN_TAKE_SECONDS && !typed.trim())) return;
     quiet();
     setPhase("sending");
     setError(null);
@@ -360,8 +440,13 @@ export function HomeworkRecorder(props: {
     if (!result.clipId) saved.current = null; // upload again on "Try again"
     const typedText = typed.trim();
     const transcript = (props.serverStt ? result.transcript || typedText : typedText || result.transcript).slice(0, 4000);
+    if (!transcript && result.heardNothing) {
+      // Hossam's ears answered and heard no words: sending it would only come back empty
+      setError({ message: NO_WORDS, retake: true });
+      return setPhase("error");
+    }
     if (!result.clipId && !transcript) {
-      setError({ en: "Your recording didn't upload. Check the connection and try again.", ar: "التسجيل ما تصيفطش. شوفي الكونيكسيون وعاودي." });
+      setError({ message: { en: "Your recording didn't upload. Check the connection and try again.", ar: "التسجيل ما تصيفطش. شوفي الكونيكسيون وعاودي." } });
       return setPhase("error");
     }
     try {
@@ -375,13 +460,27 @@ export function HomeworkRecorder(props: {
           pronunciation: warm.state === "done" ? warm.result : undefined,
         }),
       });
+      if (response.ok) {
+        const data = (await response.json().catch(() => null)) as { status?: string } | null;
+        // No words in it after all: the homework is open again, record it once more
+        if (data?.status === "retake") {
+          setError({ message: NO_WORDS, retake: true });
+          setPhase("error");
+        }
+        return router.refresh();
+      }
       // Already handed in from another tab, or gone: the page shows what's there now
-      if (response.ok || response.status === 404 || response.status === 409) return router.refresh();
+      if (response.status === 404 || response.status === 409) return router.refresh();
       const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      setError({ en: data?.error ? `${data.error}.` : "Hossam couldn't take it right now. Try again in a moment.", ar: "حسام ما قدرش ياخدو دابا. عاودي من بعد شوية." });
+      setError({
+        message: {
+          en: data?.error ? `${data.error}.` : "Hossam couldn't take it right now. Try again in a moment.",
+          ar: "حسام ما قدرش ياخدو دابا. عاودي من بعد شوية.",
+        },
+      });
       setPhase("error");
     } catch {
-      setError({ en: "Couldn't reach Hossam. Your recording is still here: tap to try again.", ar: "ما وصلناش لحسام. التسجيل ديالك باقي هنا: عاودي." });
+      setError({ message: { en: "Couldn't reach Hossam. Your recording is still here: tap to try again.", ar: "ما وصلناش لحسام. التسجيل ديالك باقي هنا: عاودي." } });
       setPhase("error");
     }
   }
@@ -410,17 +509,17 @@ export function HomeworkRecorder(props: {
         <p className="text-5xl" aria-hidden>
           🙈
         </p>
-        <p className="mt-4 max-w-xs">{error.en}</p>
+        <p className="mt-4 max-w-xs">{error.message.en}</p>
         <p className="ar mt-1 max-w-xs text-sm text-ink-soft" dir="rtl">
-          {error.ar}
+          {error.message.ar}
         </p>
         <button
-          onClick={() => (take ? void send() : setPhase("task"))}
+          onClick={() => (error.retake ? again() : take ? void send() : setPhase("task"))}
           className="mt-6 w-full rounded-2xl bg-terra py-4 text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]"
         >
-          Try again
+          {error.retake ? "🎙️ Record it again" : "Try again"}
         </button>
-        {take && (
+        {take && !error.retake && (
           <button onClick={again} className="mt-2 min-h-11 px-4 text-sm text-ink-soft">
             Record it again instead
           </button>
@@ -432,9 +531,21 @@ export function HomeworkRecorder(props: {
   const target = `${props.minSeconds}–${props.maxSeconds} s`;
   const longEnough = mic.elapsed >= props.minSeconds;
   const overTime = mic.elapsed >= props.maxSeconds;
+  // A 1-second tap isn't an answer (unless she typed what she said)
+  const tooShort = take !== null && take.seconds < MIN_TAKE_SECONDS && !typed.trim();
 
   return (
     <div className="space-y-4">
+      {phase === "task" && noWords && (
+        <p className="rounded-2xl bg-saffron-soft px-3 py-2 text-sm" role="status">
+          I couldn&apos;t hear any words in your last voice note. Record it again, a little closer to the phone
+          {props.serverStt ? "" : ", or type a few words of what you said"} 💛
+          <span className="ar mt-0.5 block text-ink-soft" dir="rtl">
+            ما سمعت حتى كلمة فالأوديو اللخر. عاودي سجلي، قربي شوية من التيليفون 💛
+          </span>
+        </p>
+      )}
+
       {phase === "task" && (
         <button
           onClick={() => (reading ? quiet() : void hear())}
@@ -555,10 +666,19 @@ export function HomeworkRecorder(props: {
         ) : phase === "review" && take ? (
           <div className="w-full space-y-3 animate-rise">
             <ClipPlayer key={take.url} src={take.url} label={props.kind === "mission" ? "Your voice note" : "Your answer"} sublabel="Listen back" seconds={take.seconds} tone="mint" />
-            {take.seconds < props.minSeconds && (
-              <p className="rounded-2xl bg-saffron-soft px-3 py-2 text-sm">
-                Short and sweet! Send it like this, or try for {props.minSeconds} seconds 💛
+            {tooShort ? (
+              <p className="rounded-2xl bg-saffron-soft px-3 py-2 text-sm" role="status">
+                That was very short, Hossam can&apos;t hear an answer yet. Tap Again and talk for a little longer 💛
+                <span className="ar mt-0.5 block text-ink-soft" dir="rtl">
+                  قصير بزاف، حسام ما سمعش الجواب. ضغطي عاود وهضري شوية كتر 💛
+                </span>
               </p>
+            ) : (
+              take.seconds < props.minSeconds && (
+                <p className="rounded-2xl bg-saffron-soft px-3 py-2 text-sm">
+                  Short and sweet! Send it like this, or try for {props.minSeconds} seconds 💛
+                </p>
+              )
             )}
             {!props.serverStt && (
               <label className="block">
@@ -579,7 +699,11 @@ export function HomeworkRecorder(props: {
               <button onClick={again} className="min-h-12 rounded-2xl border border-line bg-card py-3 font-medium motion-safe:active:scale-[0.98]">
                 🔁 Again
               </button>
-              <button onClick={() => void send()} className="min-h-12 rounded-2xl bg-terra py-3 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]">
+              <button
+                onClick={() => void send()}
+                disabled={tooShort}
+                className="min-h-12 rounded-2xl bg-terra py-3 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98] disabled:opacity-50"
+              >
                 Send to Hossam ✓
               </button>
             </div>

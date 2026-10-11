@@ -1,6 +1,7 @@
 import "server-only";
 import { currentUnitFor, getSound } from "./curriculum";
-import type { Chunk, Unit } from "./curriculum/types";
+import type { Chunk, SoundId, Unit } from "./curriculum/types";
+import type { FocusSound, ShadowItem } from "./drill-phrases";
 import type { PronunciationResult, WordVerdict } from "./pronunciation/types";
 import { query, queryOne } from "./db";
 import { CONVERSATION_ACTIVITIES, getProfile, localToday, profileTimeZone } from "./learner";
@@ -50,6 +51,11 @@ export type Submission = {
   pronunciation?: PronunciationResult | null;
   /** Server speech-to-text already ran on this clip (even if it heard nothing) */
   sttTried?: boolean;
+  /**
+   * Her last voice note had no words in it (silence, a 1-second tap, or nothing could transcribe it):
+   * the item went back to 'assigned' so she can record it again, and the page says so gently.
+   */
+  heardNothing?: boolean;
   /** shadow / words: drill attempts counted */
   attempts?: number;
 };
@@ -274,6 +280,66 @@ export function shadowFromUnit(unit: Unit, n: number, today: string): NewHomewor
   };
 }
 
+// ── Shadow homework → Shadow Me with the unit's phrases ─────────────────────
+
+/** The Shadow Me door for one shadow homework item: the drill builds its round from that item's phrases. */
+export function shadowHomeworkHref(id: string, night = false) {
+  const params = new URLSearchParams({ homework: id });
+  if (night) params.set("mode", "night");
+  return `/drill/shadow?${params}`;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A homework id from a URL parameter (`?homework=`), or null. */
+export function homeworkIdParam(value: unknown) {
+  return typeof value === "string" && UUID.test(value) ? value.toLowerCase() : null;
+}
+
+/**
+ * Which homework a Shadow Me round is for: `?homework=<id>` on the request itself, else on the drill
+ * page that asked (Shadow Me's "Practice more" fetch carries the page as its Referer). null = a normal round.
+ */
+export function shadowHomeworkId(requestUrl: string, referer?: string | null) {
+  const own = homeworkIdParam(new URL(requestUrl, "http://local").searchParams.get("homework"));
+  if (own || !referer) return own;
+  try {
+    const page = new URL(referer);
+    return page.pathname === "/drill/shadow" ? homeworkIdParam(page.searchParams.get("homework")) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The unit's pronunciation focus as a Shadow Me tip; sounds without a matching tip get the rhythm tip. */
+const SOUND_FOCUS: Partial<Record<SoundId, FocusSound>> = {
+  "p-b": "p/b",
+  "v-f": "v/f",
+  "th-voiceless": "th",
+  "th-voiced": "th",
+  "short-i": "short i",
+  schwa: "schwa",
+  h: "h",
+  w: "w",
+  r: "r",
+  "word-stress": "word stress",
+};
+
+/** A shadow homework's unit phrases as a Shadow Me round (same order as the homework page lists them). */
+export function unitShadowItems(chunks: readonly Chunk[] | null | undefined, sound?: SoundId | null): ShadowItem[] {
+  const focus: FocusSound = (sound && SOUND_FOCUS[sound]) || "sentence stress";
+  const seen = new Set<string>();
+  const items: ShadowItem[] = [];
+  for (const chunk of chunks ?? []) {
+    const en = typeof chunk?.en === "string" ? chunk.en.replace(/\s+/g, " ").trim() : "";
+    const key = en.toLowerCase();
+    if (!en || seen.has(key)) continue;
+    seen.add(key);
+    items.push({ id: `unit:${key}`, en, ar: typeof chunk.ar === "string" ? chunk.ar.trim() : "", focus, source: "curated" });
+  }
+  return items;
+}
+
 export function wordsHomework(unit: Unit, n: number, today: string): NewHomework {
   return {
     kind: "words",
@@ -322,7 +388,10 @@ export type PlanInput = {
   unit: Unit;
   /** Kinds of her open (assigned) items, any unit */
   openKinds: HomeworkKind[];
-  /** Unit items already assigned today (her day): one fresh set a day, so finishing never means more */
+  /**
+   * Items for THIS unit already assigned today (her day): one fresh set a day, so finishing never means
+   * more. A new unit (placement, a passed exam) gets its own set the same day.
+   */
   createdToday: number;
   /** How many items of each kind were ever assigned for this unit (rotates prompts and missions) */
   history: Partial<Record<HomeworkKind, number>>;
@@ -562,6 +631,20 @@ export async function skipStaleHomework(userId: string, today: string) {
   return rows.length;
 }
 
+/**
+ * Her unit changed (placement, a passed exam): open unit items from any other unit quietly drop off
+ * ('skipped', like stale ones), so the new unit's set comes right away. "Say your fixes" items stay.
+ */
+export async function skipOtherUnitHomework(userId: string, unitId: string) {
+  const rows = await query<{ id: string }>(
+    `update homework set status = 'skipped'
+      where user_id = $1 and status = 'assigned' and dedupe_key like 'unit:%' and unit_id is distinct from $2
+      returning id`,
+    [userId, unitId],
+  );
+  return rows.length;
+}
+
 /** Inserts items (one statement); an item whose dedupe key already exists is left alone. Returns new ids. */
 export async function insertHomework(userId: string, items: NewHomework[]) {
   if (items.length === 0) return [];
@@ -594,15 +677,17 @@ export async function insertHomework(userId: string, items: NewHomework[]) {
 }
 
 /**
- * Keeps her homework topped up for her CURRENT unit: skips stale items, then, if fewer than 2 are
- * open and no unit set was assigned today, adds 1 speak + 1 shadow/words/mission. Returns new ids.
- * Safe to call on every Home render (concurrent calls can't duplicate items).
+ * Keeps her homework topped up for her CURRENT unit: skips stale items and open items from a unit she
+ * has left, then, if fewer than 2 are open and no set for THIS unit was assigned today, adds 1 speak +
+ * 1 shadow/words/mission. Returns new ids. Safe to call on every Home render (concurrent calls can't
+ * duplicate items).
  */
 export async function ensureHomework(userId: string) {
   const day = await herDay(userId);
   if (!day) return [];
-  await skipStaleHomework(userId, day.today);
   const unit = currentUnitFor(day.profile.current_unit, day.profile.cefr_level);
+  await Promise.all([skipStaleHomework(userId, day.today), skipOtherUnitHomework(userId, unit.id)]);
+  const unitKey = `unit:${escapeLike(unit.id)}:%`;
   const state = await queryOne<{
     open_kinds: HomeworkKind[];
     created_today: number;
@@ -612,7 +697,7 @@ export async function ensureHomework(userId: string) {
   }>(
     `select coalesce((select array_agg(kind) from homework where user_id = $1 and status = 'assigned'), '{}') as open_kinds,
             (select count(*)::int from homework
-              where user_id = $1 and dedupe_key like 'unit:%' and (created_at at time zone $2)::date = $3::date) as created_today,
+              where user_id = $1 and dedupe_key like $4 and (created_at at time zone $2)::date = $3::date) as created_today,
             coalesce((select jsonb_object_agg(kind, n) from (
                        select kind, count(*)::int as n from homework where user_id = $1 and dedupe_key like $4 group by kind) k),
                      '{}'::jsonb) as history,
@@ -620,7 +705,7 @@ export async function ensureHomework(userId: string) {
               where user_id = $1 and dedupe_key like $4 and kind in ('shadow', 'words', 'mission')
               order by created_at desc, dedupe_key desc limit 1) as last_extra,
             (select count(*)::int from vocab_item where user_id = $1) as garden`,
-    [userId, day.timeZone, day.today, `unit:${escapeLike(unit.id)}:%`],
+    [userId, day.timeZone, day.today, unitKey],
   );
   const plan = planNewHomework({
     unit,
@@ -677,8 +762,10 @@ export async function assignHomeworkAfterSession(userId: string, sessionId: stri
 
 /**
  * Completes open shadow / words items once she has done enough drill attempts since they were
- * assigned: status 'reviewed', score = drill average, points (also as a 'homework' coach_session
- * with the same id, so Home / Progress / Cheer Squad count it). Returns progress for the ones still open.
+ * assigned: status 'reviewed', score = drill average, points. The points live on ONE 'homework'
+ * coach_session row with the homework's own id (so Home / Progress / Cheer Squad count them, and a
+ * second sync can't add another row). A shadow item only counts tries on ITS unit phrases
+ * (payload.chunks); words items count any Say It Back try. Returns progress for the ones still open.
  */
 export async function syncAutoHomework(userId: string) {
   const items = await query<{ id: string; kind: "shadow" | "words"; goal: number; attempts: { target: string; score: number }[] }>(
@@ -686,8 +773,13 @@ export async function syncAutoHomework(userId: string) {
             coalesce((select jsonb_agg(jsonb_build_object('target', d.target, 'score', d.score) order by d.id)
                         from drill_attempt d
                        where d.user_id = h.user_id and d.created_at >= h.created_at
-                         and d.kind = (case when h.kind = 'shadow' then 'shadow' else 'review' end)), '[]'::jsonb) as attempts
-       from homework h
+                         and d.kind = (case when h.kind = 'shadow' then 'shadow' else 'review' end)
+                         and (h.kind <> 'shadow'
+                              or coalesce(jsonb_array_length(h.chunks), 0) = 0
+                              or lower(regexp_replace(btrim(d.target), '\\s+', ' ', 'g')) in (
+                                   select lower(regexp_replace(btrim(c->>'en'), '\\s+', ' ', 'g'))
+                                     from jsonb_array_elements(coalesce(h.chunks, '[]'::jsonb)) c))), '[]'::jsonb) as attempts
+       from (select *, case when jsonb_typeof(payload->'chunks') = 'array' then payload->'chunks' end as chunks from homework) h
       where h.user_id = $1 and h.status = 'assigned' and h.kind in ('shadow', 'words')`,
     [userId, DRILL_GOAL],
   );
@@ -748,7 +840,9 @@ export async function listHomework(userId: string, timeZone: string, doneLimit =
   };
 }
 
-/** Sync drills + top up, then read the board. What /homework, the Home card and GET /api/homework show. */
+export type HomeworkBoard = NonNullable<Awaited<ReturnType<typeof homeworkBoard>>>;
+
+/** Sync drills + top up, then read the board. What /homework, Home (plan + card) and GET /api/homework show. */
 export async function homeworkBoard(userId: string) {
   const day = await herDay(userId);
   if (!day) return null;
@@ -764,22 +858,30 @@ export async function homeworkBoard(userId: string) {
 
 /**
  * Saves a voice-note submission (speak / mission) and its 'homework' coach_session (same id, base
- * points, her speaking time) in one statement, at most once. Late (skipped) items still count.
+ * points, her speaking time) in one statement, at most once per hand-in. Late (skipped) items still
+ * count. That one row is the only place the homework's points live: a re-recording after an empty
+ * note (see resetEmptySubmission) rewrites it instead of adding another.
  */
 export async function saveSubmission(input: { id: string; userId: string; submission: Submission; points: number }) {
   const seconds = Math.max(0, Math.round(input.submission.seconds));
+  const submission: Submission = { ...input.submission, seconds };
+  delete submission.heardNothing;
   const saved = await queryOne<{ id: string }>(
     `with saved as (
-       update homework set status = 'submitted', submitted_at = now(), submission = $3::jsonb, points = $4::int
+       update homework set status = 'submitted', submitted_at = now(), submission = $3::jsonb, points = $4::int,
+              review_started_at = null
         where id = $1 and user_id = $2 and status in ('assigned', 'skipped') and kind in ('speak', 'mission')
         returning id
      ), practice as (
        insert into coach_session (id, user_id, mode, minutes_planned, started_at, ended_at, speaking_seconds, points, activity)
        select id, $2, 'normal', 3, now() - make_interval(secs => $5::int), now(), $5::int, $4::int, 'homework' from saved
-       on conflict (id) do nothing
+       on conflict (id) do update
+         set started_at = excluded.started_at, ended_at = excluded.ended_at,
+             speaking_seconds = excluded.speaking_seconds, points = excluded.points
+         where coach_session.user_id = excluded.user_id and coach_session.activity = 'homework'
      )
      select id from saved`,
-    [input.id, input.userId, JSON.stringify({ ...input.submission, seconds }), input.points, seconds],
+    [input.id, input.userId, JSON.stringify(submission), input.points, seconds],
   );
   if (saved) return "created" as const;
   const current = await queryOne<{ kind: HomeworkKind; status: HomeworkStatus }>(
@@ -789,4 +891,39 @@ export async function saveSubmission(input: { id: string; userId: string; submis
   if (!current) return "not-found" as const;
   if (!isVoiceKind(current.kind)) return "wrong-kind" as const;
   return "exists" as const;
+}
+
+/**
+ * A voice note with no words in it (Scribe heard nothing, a 1-second tap, or nothing can transcribe it):
+ * the item goes back to 'assigned' so she can record it again, and its 'homework' coach_session row
+ * (the points and speaking time of that empty note) is removed, in one statement. The empty clip is let
+ * go (the orphan-clip sweep deletes it). Only a 'submitted' item is reset. Returns true if it was.
+ */
+export async function resetEmptySubmission(id: string, userId: string) {
+  const submission: Submission = { transcript: "", clipId: null, seconds: 0, heardNothing: true };
+  const reset = await queryOne<{ id: string }>(
+    `with reset as (
+       update homework set status = 'assigned', submitted_at = null, points = 0, score = null, feedback = null,
+              review_started_at = null, submission = $3::jsonb
+        where id = $1 and user_id = $2 and status = 'submitted' and kind in ('speak', 'mission')
+        returning id
+     ), gone as (
+       delete from coach_session where id in (select id from reset) and user_id = $2 and activity = 'homework'
+     )
+     select id from reset`,
+    [id, userId, JSON.stringify(submission)],
+  );
+  return reset !== null;
+}
+
+/** Waiting reviews retry by themselves this long after she handed them in (the submit request tries first). */
+export const AUTO_REVIEW_AFTER_MS = 2 * 60_000;
+
+/** Voice notes whose review is worth retrying in the background now: handed in a while ago, oldest first. */
+export function reviewsToRetry(waiting: Pick<HomeworkItem, "id" | "kind" | "status" | "submitted_at">[], now = Date.now()) {
+  return waiting
+    .filter((item) => item.status === "submitted" && isVoiceKind(item.kind) && item.submitted_at)
+    .filter((item) => now - +item.submitted_at! >= AUTO_REVIEW_AFTER_MS)
+    .sort((a, b) => +a.submitted_at! - +b.submitted_at!)
+    .map((item) => item.id);
 }

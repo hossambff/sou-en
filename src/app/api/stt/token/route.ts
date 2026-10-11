@@ -7,9 +7,14 @@ const TOKEN_TIMEOUT_MS = 8000;
  * A single-use ElevenLabs token for live (realtime) transcription, so the browser can stream Sou's voice
  * straight to Scribe without ever seeing the API key. Valid ~15 minutes, one WebSocket session.
  * Learner only; each token counts as one call against DAILY_STT_LIMIT.
- * → 200 { token } · 401 · 429 daily limit · 501 not configured · 502 ElevenLabs failed
+ * POST only, from this app's own pages: a GET (a link, a cross-site navigation, which carries her cookie)
+ * must not spend her daily listening quota.
+ * → 200 { token } · 401 · 403 another site · 429 daily limit · 501 not configured · 502 ElevenLabs failed
  */
-async function issueToken() {
+export async function POST(request: Request) {
+  // Browsers say where a request comes from; only our own pages may ask (no header: not a browser, let auth decide)
+  const site = request.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin") return new Response("Forbidden", { status: 403 });
   if (!(await getLearnerUserId())) return new Response("Unauthorized", { status: 401 });
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) return new Response("Speech-to-text is not configured", { status: 501 });
@@ -33,12 +38,4 @@ async function issueToken() {
     console.error("Realtime STT token unreachable", error instanceof Error ? error.message : error);
     return new Response("Live listening is unavailable", { status: 502 });
   }
-}
-
-export async function POST() {
-  return issueToken();
-}
-
-export async function GET() {
-  return issueToken();
 }

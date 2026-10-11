@@ -52,6 +52,14 @@ describe("sliceToWav", () => {
     const all = await sliceToWav(chunks).arrayBuffer();
     expect(parseWav(all)!.dataBytes).toBe(16);
   });
+
+  it("keeps 30 s by default (pronunciation scoring); transcription can ask for more", async () => {
+    const second = new Int16Array(16_000);
+    const chunks = Array.from({ length: 40 }, () => second);
+    expect(parseWav(await sliceToWav(chunks).arrayBuffer())!.seconds).toBe(30);
+    expect(parseWav(await sliceToWav(chunks, 0, Infinity, 50).arrayBuffer())!.seconds).toBe(40);
+    expect(parseWav(await sliceToWav(chunks, 5 * 16_000, 40 * 16_000, 50).arrayBuffer())!.seconds).toBe(35);
+  });
 });
 
 describe("UtteranceRecorder", () => {

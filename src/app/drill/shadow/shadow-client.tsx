@@ -10,7 +10,15 @@ import { sttFailure } from "@/lib/voice/listener";
 import { assessPronunciation } from "@/lib/pronunciation/client";
 import type { PronunciationResult } from "@/lib/pronunciation/types";
 import { SpeakButton } from "@/components/speak-button";
-import { BasicEngineNote, SoundTipCard, SubScores, VerdictLegend, WordChips } from "../../pronunciation/pronunciation-ui";
+import {
+  BasicEngineNote,
+  SoundTipCard,
+  SubScores,
+  VerdictLegend,
+  WordChips,
+  engineNoteFor,
+  labHref,
+} from "../../pronunciation/pronunciation-ui";
 import {
   DrillMain,
   DrillOrb,
@@ -155,7 +163,9 @@ export function ShadowClient(props: {
       if (myTurn === turn.current) go("hearing");
     };
 
-    if (Date.now() >= pronOffUntil.current) {
+    // A whisper has no voice, so sound scoring would flag B, V, TH… she can't voice: whisper rounds use the
+    // transcript comparison (and stay out of her sound history)
+    if (!whisper && Date.now() >= pronOffUntil.current) {
       // Real pronunciation scoring: keep her voice, score each word and sound
       const recording = await voice.record({ noSpeechTimeoutMs: 12_000, onLevel: setLevel, onSpeechStart });
       if (myTurn !== turn.current) return;
@@ -207,13 +217,19 @@ export function ShadowClient(props: {
     showResult(item.en, itemIndex, heard.seconds, { kind: "text", score: scoreShadow(item.en, heard.text), heard: heard.text });
   }
 
-  /** Counts the attempt (points are saved by the server from what was heard) and shows how it went. */
+  /**
+   * Counts the attempt and shows how it went. The server saves the same score she sees: the pronunciation
+   * attempt it already scored (by id), else its own comparison of what was heard.
+   */
   function showResult(target: string, itemIndex: number, seconds: number, attempt: Result) {
     const score = attempt.kind === "pron" ? attempt.pron.score : attempt.score.score;
     const heard = attempt.kind === "pron" ? attempt.pron.heard : attempt.heard;
+    const pronunciationId = attempt.kind === "pron" ? attempt.pron.attemptId : undefined;
     run.current.speaking += seconds;
     run.current.attempts.push({ target, score });
-    run.current.pending.push(postJson("/api/drill/attempt", { kind: "shadow", runId: run.current.id, target, heard }));
+    run.current.pending.push(
+      postJson("/api/drill/attempt", { kind: "shadow", runId: run.current.id, target, heard, ...(pronunciationId ? { pronunciationId } : {}) }),
+    );
     setBest((current) => current.map((value, i) => (i === itemIndex ? Math.max(value ?? 0, score) : value)));
     setResult(attempt);
     go("result");
@@ -400,7 +416,7 @@ export function ShadowClient(props: {
 
           {props.pronunciation && (
             <Link
-              href="/pronunciation"
+              href={labHref({ mode: props.mode })}
               className="flex min-h-11 items-center justify-between rounded-3xl border border-line bg-card px-4 py-3 text-sm shadow-card motion-safe:active:scale-[0.98]"
             >
               <span>
@@ -495,7 +511,7 @@ export function ShadowClient(props: {
 
         {phase === "result" && result ? (
           result.kind === "pron" ? (
-            <PronunciationPanel result={result.pron} tip={tip} onHear={hearWord} />
+            <PronunciationPanel result={result.pron} tip={tip} onHear={hearWord} mode={props.mode} />
           ) : (
             <ResultPanel result={result} tip={tip} />
           )
@@ -621,13 +637,16 @@ function PronunciationPanel({
   result,
   tip,
   onHear,
+  mode,
 }: {
   result: PronunciationResult;
   tip: { en: string; ar: string };
   onHear: (word: string) => void;
+  mode: DrillMode;
 }) {
   const copy = TIER_COPY[tierFor(result.score, result.words.some((w) => w.verdict !== "missed"))];
   const sound = result.sounds[0];
+  const note = engineNoteFor(result);
   return (
     <div className="mt-4 flex flex-1 flex-col gap-3 animate-rise">
       <div className="flex items-center gap-4 rounded-3xl border border-line bg-card p-4 shadow-card">
@@ -649,7 +668,7 @@ function PronunciationPanel({
       </div>
       {result.score < 90 &&
         (sound ? (
-          <SoundTipCard sound={sound} words={result.words} onHear={onHear} />
+          <SoundTipCard sound={sound} words={result.words} onHear={onHear} mode={mode} />
         ) : (
           <div className="rounded-3xl bg-saffron-soft p-4 text-sm leading-relaxed text-ink">
             <p>💡 {tip.en}</p>
@@ -658,7 +677,7 @@ function PronunciationPanel({
             </p>
           </div>
         ))}
-      {result.engine === "basic" && result.score < 90 && <BasicEngineNote />}
+      {note && result.score < 90 && <BasicEngineNote reason={note} />}
     </div>
   );
 }

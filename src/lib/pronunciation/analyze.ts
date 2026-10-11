@@ -86,6 +86,49 @@ function attachDisplay(target: string, words: string[]): string[] {
   });
 }
 
+const VOWEL = /[aeiouæɑɒɔəɛɜɝɚɪʊʌɐ]/;
+const isConsonant = (phoneme: string | undefined) => Boolean(phoneme) && !VOWEL.test(phoneme!.trim().toLowerCase());
+
+/**
+ * The sound guide for the phoneme at `index` of ONE word (Azure lists a word's phonemes in order).
+ * Position matters for two guides: t/d/k/g only count for "Final sounds" at the end of the word (alone
+ * or in a final group, as in "walked"), and s/z only count for "Consonant groups" inside a group that starts
+ * or ends the word ("street", "months"). Elsewhere ("good", "is") they say nothing about either guide.
+ */
+export function soundForPhonemeAt(phonemes: readonly string[], index: number) {
+  const guide = soundForPhoneme(phonemes[index] ?? "");
+  if (guide?.id === "final-consonants") {
+    return phonemes.slice(index + 1).every(isConsonant) ? guide : undefined;
+  }
+  if (guide?.id === "clusters") {
+    let start = index;
+    while (start > 0 && isConsonant(phonemes[start - 1])) start--;
+    let end = index;
+    while (end < phonemes.length - 1 && isConsonant(phonemes[end + 1])) end++;
+    return end > start && (start === 0 || end === phonemes.length - 1) ? guide : undefined;
+  }
+  return guide;
+}
+
+/** Guides that hinge on voicing (P/B, V/F, the buzzing TH). A whisper has no voice, so they can't be judged. */
+export const VOICING_SOUNDS: readonly SoundId[] = ["p-b", "v-f", "th-voiced"];
+
+/**
+ * A whispered attempt: drop the voicing guides from the sounds to work on (and the tip), and mark it.
+ * The route never saves whispered attempts into her sound history.
+ */
+export function forWhisper(result: PronunciationResult): PronunciationResult {
+  const voicing = (id: SoundId | undefined) => Boolean(id && VOICING_SOUNDS.includes(id));
+  const sounds = result.sounds.filter((id) => !voicing(id));
+  const words = result.words.map((word) => {
+    if (!voicing(word.sound)) return word;
+    const rest = { ...word };
+    delete rest.sound;
+    return rest;
+  });
+  return { ...result, words, sounds, tip: tipFor(sounds[0]), whisper: true };
+}
+
 type SoundHit = { id: SoundId; worst: number; count: number };
 
 function rankHits(hits: Map<SoundId, SoundHit>): SoundId[] {
@@ -129,9 +172,10 @@ export function mapAzure(response: AzureResponse, target: string): Pronunciation
     const verdict: WordVerdict = errorType === "Mispronunciation" ? "mispronounced" : verdictForAccuracy(accuracy);
     let sound: SoundId | undefined;
     let soundScore = Infinity;
-    for (const phoneme of phonemes) {
+    const sequence = phonemes.map((p) => p.phoneme);
+    for (const [index, phoneme] of phonemes.entries()) {
       if (phoneme.score >= UNCLEAR_BELOW) continue;
-      const guide = soundForPhoneme(phoneme.phoneme);
+      const guide = soundForPhonemeAt(sequence, index);
       if (!guide) continue;
       const hit = hits.get(guide.id) ?? { id: guide.id, worst: phoneme.score, count: 0 };
       hit.worst = Math.min(hit.worst, phoneme.score);
@@ -299,8 +343,9 @@ function observations(word: WordResult, engine: string): { id: SoundId; score: n
   if (word.verdict === "extra" || word.verdict === "missed") return [];
   if (word.phonemes?.length) {
     const worst = new Map<SoundId, number>();
-    for (const phoneme of word.phonemes) {
-      const guide = soundForPhoneme(phoneme.phoneme);
+    const sequence = word.phonemes.map((p) => p.phoneme);
+    for (const [index, phoneme] of word.phonemes.entries()) {
+      const guide = soundForPhonemeAt(sequence, index);
       if (guide) worst.set(guide.id, Math.min(worst.get(guide.id) ?? 100, phoneme.score));
     }
     if (worst.size || engine === "azure") return [...worst].map(([id, score]) => ({ id, score }));

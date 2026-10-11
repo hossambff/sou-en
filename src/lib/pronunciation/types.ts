@@ -34,4 +34,10 @@ export type PronunciationResult = {
   sounds: SoundId[];
   /** Short bilingual coaching line */
   tip: { en: string; ar: string } | null;
+  /** Basic engine although Azure is set up (Azure failed or is resting, or the recording wasn't WAV) */
+  fallback?: boolean;
+  /** Whispered: checked without the voicing sounds, and not saved to her sound history */
+  whisper?: boolean;
+  /** The saved pronunciation_attempt row (Shadow Me sends it with the drill attempt so the same score is kept) */
+  attemptId?: string;
 };

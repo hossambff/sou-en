@@ -192,7 +192,16 @@ async function scoreClaimedCheckup(checkupId: string, userId: string): Promise<S
 
   let result: z.infer<typeof resultSchema>;
   try {
-    result = await structured({ schema: resultSchema, instructions: INSTRUCTIONS, prompt, effort: "medium", maxTokens: 6000 });
+    // Bounded so the route (maxDuration 60 s) always answers: transcription above takes up to ~20 s
+    result = await structured({
+      schema: resultSchema,
+      instructions: INSTRUCTIONS,
+      prompt,
+      effort: "medium",
+      maxTokens: 6000,
+      timeoutMs: 30_000,
+      maxRetries: 0,
+    });
   } catch (error) {
     console.error("Check-up scoring failed", error);
     return { status: "pending", reason: "unavailable" };
@@ -210,14 +219,31 @@ async function scoreClaimedCheckup(checkupId: string, userId: string): Promise<S
       where id = $1 and user_id = $2 and status = 'pending' returning id`,
     [checkupId, userId, cefr, JSON.stringify(normalizeScores(result.scores)), JSON.stringify(report)],
   );
-  // Her level estimate follows her most recent scored check-up
-  if (updated) {
-    await query(
-      `update learner_profile set cefr_level = $2
-        where user_id = $1
-          and not exists (select 1 from checkup where user_id = $1 and status = 'ready' and created_at > $3)`,
-      [userId, cefr, row.created_at],
-    );
-  }
+  if (updated) await applyCheckupLevel(userId, cefr, row.created_at);
   return { status: "ready" };
+}
+
+/**
+ * The check-up's CEFR estimate always stays on the check-up row (her before/after story). It only
+ * becomes her level while nothing else has set one: no placement done, no unit set, no unit started
+ * or examined. Once the placement or an exam has set her level and unit, those own it: a check-up
+ * (a different, speaking-only estimate) must not pull her level away from her unit, in either
+ * direction (the coach's style and English share follow the level, the lessons follow the unit).
+ * Also only her most recent scored check-up counts.
+ */
+export async function applyCheckupLevel(
+  userId: string,
+  cefr: string,
+  checkupCreatedAt: Date | string,
+  run: (text: string, params: unknown[]) => Promise<unknown> = query,
+) {
+  await run(
+    `update learner_profile set cefr_level = $2
+      where user_id = $1
+        and placement_status <> 'done'
+        and current_unit is null
+        and not exists (select 1 from unit_progress where user_id = $1)
+        and not exists (select 1 from checkup where user_id = $1 and status = 'ready' and created_at > $3)`,
+    [userId, cefr, checkupCreatedAt],
+  );
 }

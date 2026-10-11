@@ -8,6 +8,7 @@
 
 import {
   CEFR_LEVELS,
+  UNITS,
   cefrFromScore,
   cefrRank,
   firstUnitFor,
@@ -298,9 +299,14 @@ export function overallScore(skills: SkillScores): number | null {
   return weight ? Math.round(total / weight) : null;
 }
 
+/** Without any speaking at all, the level goes no higher than this (the course is a speaking course). */
+export const NO_SPEAKING_CAP: Cefr = "A2";
+
 /**
  * Overall score and CEFR level. The level never strays more than one band from her speaking level:
  * great listening can't put someone who barely speaks into conversation-level units (and vice versa).
+ * With no speaking measured at all (she skipped the part) it is capped at NO_SPEAKING_CAP: one band
+ * above a non-speaker, the same as the clamp gives someone who answered with nothing.
  */
 export function placementLevel(skills: SkillScores): { score: number; level: Cefr } {
   const raw = overallScore(skills) ?? 0;
@@ -310,6 +316,8 @@ export function placementLevel(skills: SkillScores): { score: number; level: Cef
     const lowest = LEVEL_BANDS[Math.max(0, speakingRank - 1)];
     const highest = LEVEL_BANDS[Math.min(TOP_RANK, speakingRank + 1)];
     score = clamp(raw, lowest.lo, highest.hi);
+  } else {
+    score = Math.min(raw, bandFor(NO_SPEAKING_CAP).hi);
   }
   return { score, level: cefrFromScore(score) };
 }
@@ -339,6 +347,11 @@ export type PlacementResult = {
   wpm: number | null;
   /** True until Hossam has listened to her speaking (speaking + grammar are estimates) */
   provisional: boolean;
+  /**
+   * She skipped the speaking (no recording, no words): the level is a careful first guess capped at
+   * NO_SPEAKING_CAP. A retake may move her down as well as up, and needn't wait a week.
+   */
+  speakingSkipped: boolean;
   /** The unit she starts at */
   startUnit: string;
   rubric: SpeakingRubric | null;
@@ -390,6 +403,8 @@ export function buildPlacementResult(input: {
   const pronunciation = sectionScore(input.repeat);
   const speakingEstimate = sectionScore(input.speaking);
   const spoke = input.speaking.length > 0;
+  const samples = input.samples ?? [];
+  const speakingSkipped = !input.speaking.some((s) => s.credit > 0) && !samples.some((s) => s.seconds > 0);
 
   const skills: SkillScores = {};
   if (listening !== null) skills.listening = listening;
@@ -407,7 +422,6 @@ export function buildPlacementResult(input: {
   }
 
   const { score, level } = placementLevel(skills);
-  const samples = input.samples ?? [];
   const words = samples.reduce((sum, s) => sum + s.words, 0);
   const seconds = samples.reduce((sum, s) => sum + s.seconds, 0);
 
@@ -418,6 +432,7 @@ export function buildPlacementResult(input: {
     sections: { listening, vocabulary, pronunciation, speaking: speakingEstimate },
     wpm: wordsPerMinute(words, seconds),
     provisional: spoke && !verdict,
+    speakingSkipped,
     startUnit: firstUnitFor(level).id,
     rubric: verdict && spoke ? verdict.rubric : null,
     speakingCefr: verdict && spoke ? verdict.cefr : null,
@@ -445,18 +460,69 @@ export function blendSkills(old: SkillScores | null | undefined, fresh: SkillSco
   return out;
 }
 
+const COURSE = [...UNITS].sort((a, b) => a.order - b.order);
+
+/**
+ * The first unit from `unitId` on (itself included) that she hasn't passed; undefined when she has
+ * passed that one and every unit after it (the course is complete).
+ */
+export function firstUnpassedUnit(unitId: string | null | undefined, passed: ReadonlySet<string>) {
+  const start = COURSE.findIndex((unit) => unit.id === unitId);
+  if (start < 0) return undefined;
+  return COURSE.slice(start).find((unit) => !passed.has(unit.id));
+}
+
 /**
  * Her new level, unit and skills after a placement.
  * - First placement: exactly the result (start at the first unit of her level).
- * - Retake: only ever moves her forward (a tired day can't send her back), and skills are blended 50/50.
+ * - Forward-only (a retake, or she already made progress in the course): only ever moves her forward
+ *   (a tired day can't send her back), and skills are blended 50/50.
+ * Either way she never lands on a unit she has already passed (`passed`): she moves on to the next one
+ * she hasn't, and her level rises with that unit when it's higher.
  */
-export function placementUpdate(current: LearnerLevelState, result: Pick<PlacementResult, "level" | "skills" | "startUnit">, retake: boolean): LearnerLevelState {
-  if (!retake) return { level: result.level, unitId: result.startUnit, skills: { ...current.skills, ...result.skills } };
-  const currentUnit = getUnit(current.unitId);
-  const placedUnit = getUnit(result.startUnit);
-  const unit = currentUnit && placedUnit ? (placedUnit.order > currentUnit.order ? placedUnit : currentUnit) : (placedUnit ?? currentUnit);
-  const level = CEFR_LEVELS[Math.max(cefrRank(current.level), cefrRank(result.level), unit ? cefrRank(unit.level) : 0)];
-  return { level, unitId: unit?.id ?? result.startUnit, skills: blendSkills(current.skills, result.skills, 0.5) };
+export function placementUpdate(
+  current: LearnerLevelState,
+  result: Pick<PlacementResult, "level" | "skills" | "startUnit">,
+  forwardOnly: boolean,
+  passed: ReadonlySet<string> = new Set(),
+): LearnerLevelState {
+  let next: LearnerLevelState;
+  if (!forwardOnly) {
+    next = { level: result.level, unitId: result.startUnit, skills: { ...current.skills, ...result.skills } };
+  } else {
+    const currentUnit = getUnit(current.unitId);
+    const placedUnit = getUnit(result.startUnit);
+    const unit = currentUnit && placedUnit ? (placedUnit.order > currentUnit.order ? placedUnit : currentUnit) : (placedUnit ?? currentUnit);
+    const level = CEFR_LEVELS[Math.max(cefrRank(current.level), cefrRank(result.level), unit ? cefrRank(unit.level) : 0)];
+    next = { level, unitId: unit?.id ?? result.startUnit, skills: blendSkills(current.skills, result.skills, 0.5) };
+  }
+  if (next.unitId && passed.has(next.unitId)) {
+    const open = firstUnpassedUnit(next.unitId, passed);
+    // Passed everything from here on: stay on it (course complete)
+    if (open) next = { ...next, unitId: open.id, level: CEFR_LEVELS[Math.max(cefrRank(next.level), cefrRank(open.level))] };
+  }
+  return next;
+}
+
+/**
+ * Does this placement only move her forward? Yes when she had placed before or already made progress
+ * in the course (passed a unit exam) — unless her last placement was only a first guess (speaking
+ * skipped, or Hossam never listened) and she hasn't passed a unit since: then the new result replaces
+ * it, down as well as up, so a too-high start can be corrected.
+ */
+export function placementIsForwardOnly(input: {
+  /** She had placed before (or progressed) when she took this one */
+  retake: boolean;
+  /** She has passed a unit, or an exam set her unit */
+  progressed: boolean;
+  /** Her last applied placement before this one was provisional or had no speaking */
+  previousProvisional: boolean;
+  /** She passed a unit after that last placement */
+  passedSincePrevious: boolean;
+}) {
+  if (!input.retake && !input.progressed) return false;
+  if (input.previousProvisional && !input.passedSincePrevious) return false;
+  return true;
 }
 
 // ── Retakes ─────────────────────────────────────────────────────────────────

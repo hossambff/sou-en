@@ -8,6 +8,8 @@
  * the browser's recognition when the phone has it, and tells the caller.
  */
 
+import { turnPauseMs } from "./turn";
+
 export type Utterance = { text: string; seconds: number };
 
 /** Why listening failed (as opposed to her simply not saying anything). */
@@ -232,7 +234,7 @@ export class Listener {
       // Adaptive threshold: calibrate on the room's noise floor
       let noiseFloor = 0.005;
       const startThreshold = () => Math.max(whisper ? 0.008 : 0.015, noiseFloor * 3);
-      const silenceMs = whisper ? 2000 : 1500;
+      const silenceMs = turnPauseMs(whisper); // same patience as live listening
 
       const startedAt = performance.now();
       let speechStartedAt: number | null = null;

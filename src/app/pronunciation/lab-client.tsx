@@ -6,12 +6,14 @@ import { getSound, type SoundGuide, type SoundId } from "@/lib/curriculum";
 import type { SoundProgress } from "@/lib/pronunciation/analyze";
 import { assessPronunciation, type AssessOutcome } from "@/lib/pronunciation/client";
 import type { PronunciationResult, WordVerdict } from "@/lib/pronunciation/types";
+import { drillHref } from "@/lib/scenarios";
 import { useNightTheme } from "@/lib/use-night-theme";
 import { DrillMain, useDrillVoice, type DrillMode } from "../drill/drill-ui";
 import { MIC_NOTICE, type Notice } from "../drill/listen-notice";
-import { BasicEngineNote, VERDICT_STYLE, VerdictLegend, WordChips } from "./pronunciation-ui";
+import { BasicEngineNote, VERDICT_STYLE, VerdictLegend, WordChips, engineNoteFor, pairHint } from "./pronunciation-ui";
 
-type Active = { key: string; phase: "listening" | "hearing" | "checking" };
+/** The mic in use; `turn` tells this attempt apart from a later one on the same mic. */
+type Active = { key: string; phase: "listening" | "hearing" | "checking"; turn: number };
 
 const FAILED: Record<Exclude<AssessOutcome, { ok: true }>["reason"], Notice> = {
   unclear: { en: "I couldn't hear it. Try again a bit closer to the phone?", ar: "ما سمعتكش. عاودي قريبة شوية من التيليفون؟" },
@@ -54,6 +56,8 @@ export function PronunciationLab(props: {
   const [level, setLevel] = useState(0);
   const turn = useRef(0);
   const activeRef = useRef<Active | null>(null);
+  /** Per mic, the latest attempt sent for checking (an older answer arriving late is ignored) */
+  const latestCheck = useRef<Record<string, number>>({});
 
   function setActiveNow(next: Active | null) {
     activeRef.current = next;
@@ -78,9 +82,9 @@ export function PronunciationLab(props: {
     } catch {}
   }
 
-  /** Tap 🔊: Hossam says it (slowly for single words). */
+  /** Tap 🔊: Hossam says it (slowly for single words). Stops a recording, but an answer being checked still lands. */
   function hear(text: string, slow = false) {
-    if (activeRef.current) {
+    if (activeRef.current && activeRef.current.phase !== "checking") {
       turn.current++;
       setActiveNow(null);
     }
@@ -97,7 +101,7 @@ export function PronunciationLab(props: {
     const myTurn = ++turn.current;
     voice.stopAll();
     setNotes((current) => ({ ...current, [key]: undefined }));
-    setActiveNow({ key, phase: "listening" });
+    setActiveNow({ key, phase: "listening", turn: myTurn });
     if (!(await voice.prepare())) {
       if (myTurn !== turn.current) return;
       setNotes((current) => ({ ...current, [key]: MIC_NOTICE }));
@@ -109,7 +113,7 @@ export function PronunciationLab(props: {
       maxUtteranceMs: 20_000,
       onLevel: setLevel,
       onSpeechStart: () => {
-        if (myTurn === turn.current) setActiveNow({ key, phase: "hearing" });
+        if (myTurn === turn.current) setActiveNow({ key, phase: "hearing", turn: myTurn });
       },
     });
     if (myTurn !== turn.current) return;
@@ -120,10 +124,12 @@ export function PronunciationLab(props: {
       }
       return;
     }
-    setActiveNow({ key, phase: "checking" });
-    const outcome = await assessPronunciation({ audio: recording.wav, target, source: "lab", seconds: recording.seconds });
-    if (myTurn !== turn.current) return;
-    setActiveNow(null);
+    setActiveNow({ key, phase: "checking", turn: myTurn });
+    latestCheck.current[key] = myTurn;
+    const outcome = await assessPronunciation({ audio: recording.wav, target, source: "lab", seconds: recording.seconds, mode: props.mode });
+    // The server already scored (and saved) it: show it on its own mic even if she tapped 🔊 or another mic meanwhile
+    if (activeRef.current?.turn === myTurn) setActiveNow(null);
+    if (latestCheck.current[key] !== myTurn) return;
     if (outcome.ok) setResults((current) => ({ ...current, [key]: outcome.result }));
     else setNotes((current) => ({ ...current, [key]: FAILED[outcome.reason] }));
   }
@@ -160,6 +166,7 @@ export function PronunciationLab(props: {
             level={level}
             scoring={props.scoring}
             engine={props.engine}
+            whisper={props.mode === "whisper"}
             onHear={hear}
             onPractice={practice}
           />
@@ -170,6 +177,7 @@ export function PronunciationLab(props: {
             allSounds={props.allSounds}
             engine={props.engine}
             scoring={props.scoring}
+            mode={props.mode}
             onOpen={open}
           />
         )}
@@ -186,6 +194,7 @@ function LabHome({
   allSounds,
   engine,
   scoring,
+  mode,
   onOpen,
 }: {
   sounds: SoundProgress[];
@@ -193,6 +202,7 @@ function LabHome({
   allSounds: SoundId[];
   engine: "azure" | "basic";
   scoring: boolean;
+  mode: DrillMode;
   onOpen: (sound: SoundId) => void;
 }) {
   return (
@@ -212,7 +222,11 @@ function LabHome({
           </span>
         </p>
       )}
-      {scoring && engine === "basic" && <BasicEngineNote className="animate-rise" />}
+      {scoring && mode === "whisper" ? (
+        <BasicEngineNote reason="whisper" className="animate-rise" />
+      ) : (
+        scoring && engine === "basic" && <BasicEngineNote className="animate-rise" />
+      )}
 
       {attempts === 0 ? (
         <section className="rounded-3xl border border-line bg-card p-5 text-center shadow-card animate-rise [animation-delay:40ms]">
@@ -224,7 +238,7 @@ function LabHome({
             ديري شي جولة ديال Shadow Me باش يسمع حسام الأصوات ديالك
           </p>
           <Link
-            href="/drill/shadow"
+            href={drillHref("shadow", { mode })}
             className="mt-4 inline-flex min-h-11 items-center rounded-2xl bg-terra px-6 font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]"
           >
             Start Shadow Me <span className="ar ms-1.5 text-sm opacity-90">· يالله</span>
@@ -335,6 +349,7 @@ function SoundDetail({
   level,
   scoring,
   engine,
+  whisper,
   onHear,
   onPractice,
 }: {
@@ -346,6 +361,7 @@ function SoundDetail({
   level: number;
   scoring: boolean;
   engine: "azure" | "basic";
+  whisper: boolean;
   onHear: (text: string, slow?: boolean) => void;
   onPractice: (key: string, target: string) => void;
 }) {
@@ -383,17 +399,19 @@ function SoundDetail({
         </div>
       </section>
 
-      {scoring && engine === "basic" && <BasicEngineNote />}
+      {scoring && whisper ? <BasicEngineNote reason="whisper" /> : scoring && engine === "basic" && <BasicEngineNote />}
 
       {guide.pairs.length > 0 && (
         <section className="rounded-3xl border border-line bg-card p-4 shadow-card animate-rise [animation-delay:80ms]">
           <h2 className="flex items-baseline justify-between font-medium">
-            Hear the difference
+            {guide.pairHints ? "Hear how it sounds" : "Hear the difference"}
             <span className="ar text-sm font-normal text-ink-soft" dir="rtl">
-              سمعي الفرق
+              {guide.pairHints ? "سمعي كيفاش كتنطق" : "سمعي الفرق"}
             </span>
           </h2>
-          <p className="mt-0.5 text-xs text-ink-soft">Listen to both, then say each one.</p>
+          <p className="mt-0.5 text-xs text-ink-soft">
+            {guide.pairHints ? "The small line shows how it sounds. Listen, then say the word." : "Listen to both, then say each one."}
+          </p>
           <ul className="mt-3 space-y-2.5">
             {guide.pairs.map((pair, index) => (
               <li key={pair.join("-")} className="grid grid-cols-2 gap-2">
@@ -401,9 +419,12 @@ function SoundDetail({
                   const key = `pair-${guide.id}-${index}-${side}`;
                   const result = results[key];
                   const verdict = result?.words.find((w) => w.verdict !== "extra")?.verdict;
+                  // Hossam says and the mic scores the real word; the hint is only for her eyes
+                  const hint = pairHint(guide, pair, side as 0 | 1);
                   return (
                     <div key={key} className="rounded-2xl bg-bg-deep p-2.5">
                       <p className="font-display text-xl font-semibold">{word}</p>
+                      {hint && <p className="text-xs text-ink-soft">{hint}</p>}
                       <div className="mt-2 flex items-center gap-1.5">
                         <HearButton label={`Hear "${word}"`} onTap={() => onHear(word, true)} />
                         {mic(key, word, `Say "${word}"`)}
@@ -454,6 +475,7 @@ function SoundDetail({
                     )}
                   </div>
                   {result && result.words.some((w) => w.verdict !== "good") && <VerdictLegend words={result.words} />}
+                  {result && engineNoteFor(result) === "fallback" && <BasicEngineNote reason="fallback" className="mt-2" />}
                   {notes[key] && <NoteLine notice={notes[key]!} />}
                 </li>
               );

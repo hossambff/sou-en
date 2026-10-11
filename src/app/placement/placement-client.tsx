@@ -26,6 +26,7 @@ import { useScreenWake } from "@/lib/screen-wake";
 import { newRunId } from "@/app/drill/drill-ui";
 import { Shell } from "@/app/exams/_ui/badges";
 import { ListenItem, PrimaryButton, QuietButton, RepeatItem, SayItem, SpeakItem } from "@/app/exams/_ui/items";
+import { noteScoringAttempt } from "@/app/exams/_ui/retry-score";
 
 const BANK: PlacementBank = { listening: LISTENING_ITEMS, vocab: VOCAB_ITEMS, repeat: REPEAT_ITEMS, speaking: SPEAKING_PROMPTS };
 const STORAGE_KEY = "sou:placement";
@@ -79,6 +80,8 @@ type Run = {
   starts: Partial<Record<SectionId, number>>;
   section: SectionId;
   itemId: string | null;
+  /** Every part is done: only sending is left (a resume sends it instead of asking again) */
+  done?: boolean;
 };
 
 type Stage = "intro" | "welcome" | "section" | "item" | "leave" | "sending" | "error";
@@ -140,6 +143,13 @@ export function PlacementClient(props: {
   const [error, setError] = useState<string | null>(null);
   const [leavingFrom, setLeavingFrom] = useState<Stage>("intro");
   const runRef = useRef(run);
+  const stageRef = useRef<Stage>(stage);
+  /** An answer arrived while she was on the "Need to stop?" screen: move on only when she taps "Keep going" */
+  const parked = useRef(false);
+
+  useEffect(() => {
+    stageRef.current = stage;
+  }, [stage]);
 
   useScreenWake(stage === "welcome" || stage === "section" || stage === "item" || stage === "sending");
 
@@ -160,6 +170,8 @@ export function PlacementClient(props: {
     await voice.prepare(); // a refused mic is handled per question (typing, skipping)
     if (resume) {
       update(resume);
+      // Everything was answered and only the sending failed: send it, don't ask the last question again
+      if (resume.done) return finish(resume);
       return enterSection(resume, resume.section, Boolean(resume.itemId));
     }
     const fresh = freshRun();
@@ -201,7 +213,9 @@ export function PlacementClient(props: {
     const index = SECTION_ORDER.indexOf(current.section);
     const following = SECTION_ORDER[index + 1];
     if (following) return enterSection(current, following);
-    void finish(current);
+    const done: Run = { ...current, itemId: null, done: true };
+    update(done);
+    void finish(done);
   }
 
   /** Her answer to the item on screen (null + null = dropped without an answer). Late calls for an old item are ignored. */
@@ -219,6 +233,12 @@ export function PlacementClient(props: {
             steps: { ...current.steps, [section]: [...current.steps[section], { itemId: item.id, level: item.level, credit }] },
           }
         : { ...current, skipped: { ...current.skipped, [section]: [...current.skipped[section], item.id] } };
+    if (stageRef.current === "leave") {
+      // She paused while the answer was saving: keep it, but stay on the pause screen
+      update({ ...next, itemId: null });
+      parked.current = true;
+      return;
+    }
     update(next);
     advance(next);
   }
@@ -255,6 +275,7 @@ export function PlacementClient(props: {
       }
       if (!response.ok) throw new Error(String(response.status));
       persist(null);
+      noteScoringAttempt(`/api/placement/${current.id}`); // Hossam just tried: the result page needn't ask again at once
       router.replace(`/placement/result/${current.id}`);
     } catch {
       setError("Couldn't reach Hossam. Your answers are safe on this phone: tap to try again.");
@@ -303,7 +324,15 @@ export function PlacementClient(props: {
           {saved ? (
             <>
               <PrimaryButton onClick={() => void begin(saved)}>
-                Continue where you left off <span className="ar">· نكملو</span>
+                {saved.done ? (
+                  <>
+                    Send my answers <span className="ar">· صيفطي الأجوبة</span>
+                  </>
+                ) : (
+                  <>
+                    Continue where you left off <span className="ar">· نكملو</span>
+                  </>
+                )}
               </PrimaryButton>
               <div className="text-center">
                 <QuietButton
@@ -382,7 +411,15 @@ export function PlacementClient(props: {
             The baby comes first. Your answers are kept on this phone, so you can continue later today.
           </p>
         </div>
-        <PrimaryButton onClick={() => setStage(leavingFrom)}>Keep going</PrimaryButton>
+        <PrimaryButton
+          onClick={() => {
+            if (!parked.current) return setStage(leavingFrom);
+            parked.current = false;
+            advance(runRef.current);
+          }}
+        >
+          Keep going
+        </PrimaryButton>
         <button onClick={() => void later()} className="mt-2 block min-h-11 w-full py-3 text-center text-sm text-ink-soft">
           Continue later · نكملو من بعد
         </button>
@@ -518,7 +555,7 @@ export function PlacementClient(props: {
           check={(said) => vocabCredit(item, said)}
           answerEn={item.accepted[0]}
           voice={voice}
-          onDone={({ said, typed }) => record({ section: "vocab", itemId: item.id, said, typed }, vocabCredit(item, said).credit)}
+          onDone={({ said, typed }) => record({ section: "vocab", itemId: item.id, said: said.slice(0, 500), typed }, vocabCredit(item, said).credit)}
         />
       );
     }

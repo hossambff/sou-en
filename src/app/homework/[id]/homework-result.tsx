@@ -65,7 +65,8 @@ export function HomeworkResult({ item }: { item: HomeworkItem }) {
           <p className="mt-2 text-sm text-ink-soft">
             Your voice note is saved and your {item.points} points already count. His feedback will appear right here.
           </p>
-          <RetryButton id={item.id} />
+          {/* Asks by itself once when she opens it (Claude may be back since the first try) */}
+          <RetryButton id={item.id} auto={item.status === "submitted"} />
         </section>
         {(recording || transcript) && (
           <section className="space-y-2 rounded-3xl border border-line bg-card p-4 shadow-card">

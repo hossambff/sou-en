@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { getSound, type SoundGuide, type SoundId } from "@/lib/curriculum";
 import type { PronunciationResult, WordResult, WordVerdict } from "@/lib/pronunciation/types";
+import type { DrillMode } from "../drill/drill-ui";
 
 /** Word chip colors: never red-for-shame, just warmer. */
 export const VERDICT_STYLE: Record<WordVerdict, string> = {
@@ -44,8 +45,15 @@ export function WordChips({
           const className = `rounded-xl leading-tight transition motion-safe:active:scale-95 ${VERDICT_STYLE[word.verdict]} ${
             size === "lg" ? "px-2 py-1" : "px-1.5 py-0.5 text-sm"
           }`;
+          // Tappable chips get a full 44 px target (short words like "I" or "a" too)
           return onHear ? (
-            <button key={i} type="button" onClick={() => onHear(text)} className={className} aria-label={label}>
+            <button
+              key={i}
+              type="button"
+              onClick={() => onHear(text)}
+              className={`${className} inline-flex min-h-11 min-w-11 items-center justify-center`}
+              aria-label={label}
+            >
               {word.word}
             </button>
           ) : (
@@ -87,17 +95,35 @@ export function pickPair(guide: SoundGuide, words: WordResult[] = []): [string, 
   return guide.pairs.find(([a, b]) => trouble.has(a.toLowerCase()) || trouble.has(b.toLowerCase())) ?? guide.pairs[0] ?? null;
 }
 
+/** The display-only hint for one side of a pair ("buh-NA-nuh"), if the guide has one. */
+export function pairHint(guide: SoundGuide, pair: readonly [string, string], side: 0 | 1): string | null {
+  const index = guide.pairs.findIndex(([a, b]) => a === pair[0] && b === pair[1]);
+  return (index >= 0 ? guide.pairHints?.[index]?.[side] : null) ?? null;
+}
+
+/** The Lab, keeping Night / Whisper mode (volume, theme, whisper-sensitive mic). */
+export function labHref(options: { mode?: DrillMode; sound?: SoundId } = {}) {
+  const params = new URLSearchParams();
+  if (options.sound) params.set("sound", options.sound);
+  if (options.mode && options.mode !== "normal") params.set("mode", options.mode);
+  const query = params.toString();
+  return query ? `/pronunciation?${query}` : "/pronunciation";
+}
+
 /** The sound to work on: why it's hard, how to make it (English + Darija), and a minimal pair to try. */
 export function SoundTipCard({
   sound,
   words,
   onHear,
   showLabLink = true,
+  mode = "normal",
 }: {
   sound: SoundId;
   words?: WordResult[];
   onHear: (text: string) => void;
   showLabLink?: boolean;
+  /** Carried into the Lab link */
+  mode?: DrillMode;
 }) {
   const guide = getSound(sound);
   if (!guide) return null;
@@ -117,21 +143,25 @@ export function SoundTipCard({
       {pair && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs text-ink-soft">Try:</span>
-          {pair.map((word) => (
-            <button
-              key={word}
-              type="button"
-              onClick={() => onHear(word)}
-              className="flex min-h-11 items-center gap-1.5 rounded-full bg-card px-3.5 text-[15px] font-medium shadow-card motion-safe:active:scale-95"
-              aria-label={`Hear "${word}"`}
-            >
-              <span aria-hidden>🔊</span>
-              {word}
-            </button>
-          ))}
+          {pair.map((word, side) => {
+            const hint = pairHint(guide, pair, side as 0 | 1);
+            return (
+              <button
+                key={word}
+                type="button"
+                onClick={() => onHear(word)}
+                className="flex min-h-11 items-center gap-1.5 rounded-full bg-card px-3.5 text-[15px] font-medium shadow-card motion-safe:active:scale-95"
+                aria-label={`Hear "${word}"`}
+              >
+                <span aria-hidden>🔊</span>
+                {word}
+                {hint && <span className="text-xs font-normal text-ink-soft">({hint})</span>}
+              </button>
+            );
+          })}
           {showLabLink && (
             <Link
-              href={`/pronunciation?sound=${encodeURIComponent(guide.id)}`}
+              href={labHref({ sound: guide.id, mode })}
               className="ml-auto flex min-h-11 items-center rounded-full px-2 text-xs font-medium text-terra underline-offset-2 hover:underline"
             >
               Practice in the Lab ›
@@ -143,13 +173,41 @@ export function SoundTipCard({
   );
 }
 
-/** Shown while scoring is transcript-only (no Azure yet). */
-export function BasicEngineNote({ className = "" }: { className?: string }) {
+const ENGINE_NOTE = {
+  /** Azure isn't configured: transcript-only scoring */
+  setup: {
+    en: "Detailed sound scoring turns on when Azure is connected. For now Hossam checks your words, not each sound.",
+    ar: "التنقيط المفصل ديال الأصوات غادي يخدم ملي نربطو Azure. دابا حسام كيشوف الكلمات، ماشي كل صوت.",
+  },
+  /** Azure is configured but this attempt fell back to the transcript check */
+  fallback: {
+    en: "The detailed sound check wasn't available this time, so Hossam fell back to checking your words.",
+    ar: "هاد المرة حسام شاف الكلمات بلا التفاصيل ديال الأصوات.",
+  },
+  /** Whisper mode: voicing can't be judged */
+  whisper: {
+    en: "You're whispering, so Hossam checks your words, not sounds like B, V or TH that need your voice.",
+    ar: "نتي كتوشوشي، داكشي علاش حسام كيشوف الكلمات، ماشي الأصوات بحال B و V و TH اللي خاصهم الصوت.",
+  },
+} as const;
+
+export type EngineNoteReason = keyof typeof ENGINE_NOTE;
+
+/** Which note fits a basic-engine (or whispered) result; null when none is needed. */
+export function engineNoteFor(result: Pick<PronunciationResult, "engine" | "fallback" | "whisper">): EngineNoteReason | null {
+  if (result.whisper) return "whisper";
+  if (result.engine !== "basic") return null;
+  return result.fallback ? "fallback" : "setup";
+}
+
+/** Why scoring is word-level only: Azure not set up, Azure unavailable this time, or she's whispering. */
+export function BasicEngineNote({ className = "", reason = "setup" }: { className?: string; reason?: EngineNoteReason }) {
+  const copy = ENGINE_NOTE[reason];
   return (
     <p className={`rounded-2xl border border-dashed border-line px-3 py-2 text-xs leading-relaxed text-ink-soft ${className}`}>
-      Detailed sound scoring turns on when Azure is connected. For now Hossam checks your words, not each sound.
+      {copy.en}
       <span className="ar mt-0.5 block" dir="rtl">
-        التنقيط المفصل ديال الأصوات غادي يخدم ملي نربطو Azure. دابا حسام كيشوف الكلمات، ماشي كل صوت.
+        {copy.ar}
       </span>
     </p>
   );

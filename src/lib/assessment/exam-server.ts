@@ -3,9 +3,10 @@ import { z } from "zod";
 import { cefrRank, currentUnitFor, getUnit, isCefr, nextUnit, type Cefr, type SkillScores, type Unit } from "@/lib/curriculum";
 import { structured } from "@/lib/claude";
 import { pointsForSession } from "@/lib/progress";
+import { claudeBudgetMs } from "./budget";
 import { type Db, defaultDb, inTransaction, one, rows } from "./db";
 import { fillTranscripts } from "./transcribe";
-import { englishWordCount, wordsPerMinute } from "./placement";
+import { englishWordCount, firstUnpassedUnit, wordsPerMinute } from "./placement";
 import {
   answersForTasks,
   answersToGrade,
@@ -75,16 +76,61 @@ export function unitProgress(userId: string, db: Db = defaultDb) {
   return rows<UnitProgressRow>(db, `select unit_id, status, mastery, started_at, passed_at from unit_progress where user_id = $1`, [userId]);
 }
 
-/** Finished sessions and drills since `since` (check-ups don't count as practice for a unit). */
+/**
+ * What counts as practising a unit: conversations (chat, role-play, story time, fix my mistakes) and
+ * drills (Shadow Me, review). Not check-ups, placements, exam attempts (two failed exams aren't
+ * practice) or homework completion rows (written next to the drill's own row, so they'd count twice).
+ */
+export const PRACTICE_ACTIVITIES = ["chat", "roleplay", "retell", "fixes", "shadow", "review"] as const;
+
+/** Finished practice sessions and drills since `since` (see PRACTICE_ACTIVITIES). */
 export async function practiceCountSince(userId: string, since: Date | string | null, db: Db = defaultDb) {
   const row = await one<{ n: number }>(
     db,
     `select count(*)::int as n from coach_session
-      where user_id = $1 and ended_at is not null and activity <> 'checkup'
+      where user_id = $1 and ended_at is not null and activity = any($3::text[])
         and ($2::timestamptz is null or started_at >= $2::timestamptz)`,
-    [userId, since],
+    [userId, since, [...PRACTICE_ACTIVITIES]],
   );
   return row?.n ?? 0;
+}
+
+/** Her ungraded (pending) exam for this unit, newest first, if any. */
+export function pendingExamFor(userId: string, unitId: string, db: Db = defaultDb) {
+  return one<{ id: string }>(
+    db,
+    `select id from exam where user_id = $1 and unit_id = $2 and kind = 'unit' and status = 'pending'
+      order by finished_at desc nulls last limit 1`,
+    [userId, unitId],
+  );
+}
+
+/**
+ * Repairs a current unit she has already passed (an older placement could set one): moves her on to
+ * the next unit she hasn't passed, raising her level with it. Returns the unit she is now on, or null
+ * when nothing needed fixing (or she has passed every unit from here on: the course is complete).
+ */
+export async function moveOffPassedUnit(userId: string, db: Db = defaultDb): Promise<Unit | null> {
+  return inTransaction(db, async (tx) => {
+    const profile = await one<{ cefr_level: string; current_unit: string | null }>(
+      tx,
+      `select cefr_level, current_unit from learner_profile where user_id = $1 for update`,
+      [userId],
+    );
+    if (!profile) return null;
+    const unit = currentUnitFor(profile.current_unit, profile.cefr_level);
+    const passed = new Set(
+      (await rows<{ unit_id: string }>(tx, `select unit_id from unit_progress where user_id = $1 and status = 'passed'`, [userId])).map((r) => r.unit_id),
+    );
+    if (!passed.has(unit.id)) return null;
+    const open = firstUnpassedUnit(unit.id, passed);
+    if (!open) return null;
+    const levelNow = isCefr(profile.cefr_level) ? profile.cefr_level : "A1";
+    const level = cefrRank(open.level) > cefrRank(levelNow) ? open.level : levelNow;
+    await tx.query(`update learner_profile set current_unit = $2, cefr_level = $3 where user_id = $1`, [userId, open.id, level]);
+    await tx.query(`insert into unit_progress (user_id, unit_id) values ($1, $2) on conflict (user_id, unit_id) do nothing`, [userId, open.id]);
+    return open;
+  });
 }
 
 /** When she may retry this unit's exam after a fail (null = now). */
@@ -188,6 +234,8 @@ export type GradeInput = {
   unit: Unit | null;
   level: string;
   items: { task: Extract<ExamTask, { kind: "speak" | "roleplay" }>; answer: Extract<ExamAnswer, { kind: "speak" | "roleplay" }> }[];
+  /** How long Hossam may take (the rest of the route's time budget) */
+  timeoutMs: number;
 };
 export type HossamGrades = { grades: ExamGrade[]; focus: string[]; message: string; messageAr: string };
 /** Hossam's grades for the recorded answers. null when he can't right now (no key, daily cap, error). */
@@ -216,14 +264,15 @@ export async function gradeExam(id: string, userId: string, db: Db = defaultDb, 
       ? { status: "scored", score: current.score, passed: Boolean(current.passed), advancedTo: current.feedback?.advancedTo ?? null }
       : { status: "pending", reason: "unavailable" };
   }
+  const startedAt = Date.now();
   try {
-    return await gradeClaimed(id, userId, db, askHossam);
+    return await gradeClaimed(id, userId, db, askHossam, startedAt);
   } finally {
     await db.query(`update exam set scoring_started_at = null where id = $1`, [id]).catch(() => {});
   }
 }
 
-async function gradeClaimed(id: string, userId: string, db: Db, askHossam: GradeSource): Promise<ExamScoreOutcome> {
+async function gradeClaimed(id: string, userId: string, db: Db, askHossam: GradeSource, startedAt: number): Promise<ExamScoreOutcome> {
   const row = await loadExam(id, userId, db);
   if (!row) throw new Error("Exam not found");
   const unit = getUnit(row.unit_id) ?? null;
@@ -235,8 +284,10 @@ async function gradeClaimed(id: string, userId: string, db: Db, askHossam: Grade
   const toGrade = answersToGrade(row.tasks, answers) as GradeInput["items"];
 
   let graded: HossamGrades | null = null;
-  if (toGrade.length && !waitingForTranscript) {
-    graded = await askHossam({ unit, level, items: toGrade }).catch((error) => {
+  // Bounded so a slow Hossam leaves it pending (retried later) instead of the route being killed
+  const timeoutMs = claudeBudgetMs(startedAt);
+  if (toGrade.length && !waitingForTranscript && timeoutMs) {
+    graded = await askHossam({ unit, level, items: toGrade, timeoutMs }).catch((error) => {
       console.error("Exam grading failed", error);
       return null;
     });
@@ -261,7 +312,14 @@ async function gradeClaimed(id: string, userId: string, db: Db, askHossam: Grade
       [userId],
     );
     const isCurrent = Boolean(profile && unit && currentUnitFor(profile.current_unit, profile.cefr_level).id === unit.id);
-    const next = passed && isCurrent && unit ? (nextUnit(unit.id) ?? null) : null;
+    let next: Unit | null = null;
+    if (passed && isCurrent && unit) {
+      // The next unit she hasn't passed yet (never one she already passed)
+      const done = new Set(
+        (await rows<{ unit_id: string }>(tx, `select unit_id from unit_progress where user_id = $1 and status = 'passed'`, [userId])).map((r) => r.unit_id),
+      );
+      next = firstUnpassedUnit(nextUnit(unit.id)?.id, done) ?? null;
+    }
 
     const feedback: ExamFeedback = {
       parts: breakdown.parts,
@@ -377,7 +435,16 @@ export async function askHossamForGrades(input: GradeInput): Promise<HossamGrade
     }),
   ].join("\n");
 
-  const raw = await structured({ schema: gradeSchema, instructions: GRADE_INSTRUCTIONS, prompt, effort: "medium", maxTokens: 6000 });
+  // One bounded attempt: a timeout leaves the exam pending (a later visit retries)
+  const raw = await structured({
+    schema: gradeSchema,
+    instructions: GRADE_INSTRUCTIONS,
+    prompt,
+    effort: "medium",
+    maxTokens: 6000,
+    timeoutMs: input.timeoutMs,
+    maxRetries: 0,
+  });
   const ids = new Set(input.items.map((item) => item.task.id));
   const grades = raw.grades
     .filter((g) => ids.has(g.taskId))

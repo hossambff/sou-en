@@ -203,6 +203,66 @@ describe("pickChunks", () => {
   });
 });
 
+describe("shadow homework drills its own unit phrases", () => {
+  const ID = "6f1c2c6e-8f0a-4c43-9d36-3f1f6f7f9a10";
+
+  it("links Shadow Me to the item (night mode kept)", () => {
+    expect(hw.shadowHomeworkHref(ID)).toBe(`/drill/shadow?homework=${ID}`);
+    expect(hw.shadowHomeworkHref(ID, true)).toBe(`/drill/shadow?homework=${ID}&mode=night`);
+  });
+
+  it("reads the homework id from the request, else from the drill page that asked (Practice more)", () => {
+    expect(hw.homeworkIdParam(ID.toUpperCase())).toBe(ID);
+    expect(hw.homeworkIdParam("nope")).toBeNull();
+    expect(hw.homeworkIdParam(["x"])).toBeNull();
+    expect(hw.shadowHomeworkId(`http://app/api/drill/shadow?homework=${ID}`)).toBe(ID);
+    expect(hw.shadowHomeworkId("http://app/api/drill/shadow", `https://sou.app/drill/shadow?homework=${ID}&mode=night`)).toBe(ID);
+    // Only the Shadow Me page's own parameter counts, and only a real id
+    expect(hw.shadowHomeworkId("http://app/api/drill/shadow", `https://sou.app/homework/${ID}?homework=${ID}`)).toBeNull();
+    expect(hw.shadowHomeworkId("http://app/api/drill/shadow", "https://sou.app/drill/shadow?homework=1%20or%201=1")).toBeNull();
+    expect(hw.shadowHomeworkId("http://app/api/drill/shadow", "not a url")).toBeNull();
+    expect(hw.shadowHomeworkId("http://app/api/drill/shadow", null)).toBeNull();
+  });
+
+  it("turns the item's chunks into a Shadow Me round with the unit's sound as the tip", () => {
+    const items = hw.unitShadowItems(
+      [
+        { en: "  Nice to   meet you. ", ar: " تشرفنا " },
+        { en: "nice to meet you.", ar: "dup" },
+        { en: "", ar: "empty" },
+        { en: "I'm Sou.", ar: "أنا سو" },
+      ],
+      "th-voiced",
+    );
+    expect(items).toEqual([
+      { id: "unit:nice to meet you.", en: "Nice to meet you.", ar: "تشرفنا", focus: "th", source: "curated" },
+      { id: "unit:i'm sou.", en: "I'm Sou.", ar: "أنا سو", focus: "th", source: "curated" },
+    ]);
+    // Sounds without a matching Shadow Me tip get the rhythm tip
+    expect(hw.unitShadowItems([{ en: "Street.", ar: "" }], "clusters")[0].focus).toBe("sentence stress");
+    expect(hw.unitShadowItems([{ en: "Hi.", ar: "" }])[0].focus).toBe("sentence stress");
+    expect(hw.unitShadowItems(undefined, "p-b")).toEqual([]);
+  });
+});
+
+describe("waiting reviews retry by themselves", () => {
+  const at = (minutesAgo: number) => new Date(Date.parse("2026-10-12T12:00:00Z") - minutesAgo * 60_000);
+  const now = Date.parse("2026-10-12T12:00:00Z");
+
+  it("picks voice notes handed in a while ago, oldest first", () => {
+    const waiting = [
+      { id: "fresh", kind: "speak" as const, status: "submitted" as const, submitted_at: at(1) },
+      { id: "old", kind: "mission" as const, status: "submitted" as const, submitted_at: at(90) },
+      { id: "older", kind: "speak" as const, status: "submitted" as const, submitted_at: at(300) },
+      { id: "drill", kind: "shadow" as const, status: "submitted" as const, submitted_at: at(300) },
+      { id: "done", kind: "speak" as const, status: "reviewed" as const, submitted_at: at(300) },
+      { id: "nodate", kind: "speak" as const, status: "submitted" as const, submitted_at: null },
+    ];
+    expect(hw.reviewsToRetry(waiting, now)).toEqual(["older", "old"]);
+    expect(hw.reviewsToRetry([], now)).toEqual([]);
+  });
+});
+
 describe("fixes after a session", () => {
   const golden = [
     { said: "I go yesterday", better: "I went yesterday.", tip: "…" },
@@ -434,7 +494,7 @@ describe("database flows", () => {
     ]);
     const ids = await hw.ensureHomework("u1");
     expect(ids).toEqual(["n1", "n2"]);
-    const skip = db.query.mock.calls.find(([text]) => text.includes("set status = 'skipped'"));
+    const skip = db.query.mock.calls.find(([text]) => text.includes("set status = 'skipped'") && text.includes("due_on <"));
     expect(skip?.[1]).toEqual(["u1", expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), 3]);
     const insert = db.query.mock.calls.find(([text]) => text.includes("insert into homework"));
     const rows = JSON.parse(String(insert?.[1]?.[1]));
@@ -458,7 +518,7 @@ describe("database flows", () => {
     const five = Array.from({ length: 5 }, (_, i) => ({ target: `p${i}`, score: 90 }));
     route([
       {
-        match: "from homework h",
+        match: "as attempts",
         rows: [
           { id: "done1", kind: "shadow", goal: 5, attempts: five },
           { id: "open1", kind: "words", goal: 5, attempts: five.slice(0, 2) },
@@ -506,5 +566,88 @@ describe("database flows", () => {
     expect(await hw.saveSubmission({ id: "h1", userId: "u1", submission, points: 15 })).toBe("wrong-kind");
     route([]);
     expect(await hw.saveSubmission({ id: "h1", userId: "u1", submission, points: 15 })).toBe("not-found");
+  });
+  it("ensureHomework drops open items from a unit she has left and gives the new unit its set the same day", async () => {
+    const placed = { ...profile, cefr_level: "B1", current_unit: "b1-01" };
+    route([
+      { match: "from learner_profile", rows: placed },
+      { match: "unit_id is distinct from", rows: [{ id: "old-speak" }, { id: "old-shadow" }] },
+      // Today's A1 set doesn't count against B1's: created_today is per unit
+      { match: "as open_kinds", rows: { open_kinds: [], created_today: 0, history: {}, last_extra: null, garden: 0 } },
+      { match: "insert into homework", rows: [{ id: "b1" }, { id: "b2" }] },
+    ]);
+    expect(await hw.ensureHomework("u1")).toEqual(["b1", "b2"]);
+    const [skipSql, skipParams] = db.query.mock.calls.find(([text]) => text.includes("unit_id is distinct from"))!;
+    expect(skipSql).toContain("status = 'assigned'");
+    expect(skipSql).toContain("dedupe_key like 'unit:%'"); // "say your fixes" items stay
+    expect(skipParams).toEqual(["u1", "b1-01"]);
+    const [stateSql, stateParams] = db.queryOne.mock.calls.find(([text]) => text.includes("as open_kinds"))!;
+    expect(stateSql).toMatch(/dedupe_key like \$4 and \(created_at at time zone \$2\)::date = \$3::date\) as created_today/);
+    expect(stateParams?.[3]).toBe("unit:b1-01:%");
+    const insert = db.query.mock.calls.find(([text]) => text.includes("insert into homework"));
+    expect(JSON.parse(String(insert?.[1]?.[1])).map((row: { unit_id: string }) => row.unit_id)).toEqual(["b1-01", "b1-01"]);
+  });
+
+  it("syncAutoHomework counts only tries on a shadow item's own phrases", async () => {
+    route([]);
+    await hw.syncAutoHomework("u1");
+    const [sql] = db.query.mock.calls.find(([text]) => text.includes("as attempts"))!;
+    expect(sql).toContain("jsonb_array_elements(coalesce(h.chunks, '[]'::jsonb))");
+    expect(sql).toContain("lower(regexp_replace(btrim(d.target), '\\s+', ' ', 'g'))");
+    // Old items without phrases (and words items) count every try, as before
+    expect(sql).toContain("h.kind <> 'shadow'");
+    expect(sql).toContain("coalesce(jsonb_array_length(h.chunks), 0) = 0");
+  });
+
+  it("a drill homework's points live on one coach_session row with the homework's id", async () => {
+    const five = Array.from({ length: 5 }, (_, i) => ({ target: `p${i}`, score: 60 }));
+    route([
+      { match: "as attempts", rows: [{ id: "hw-1", kind: "shadow", goal: 5, attempts: five }] },
+      { match: "with done as", rows: { id: "hw-1" } },
+    ]);
+    await hw.syncAutoHomework("u1");
+    const [sql, params] = db.queryOne.mock.calls.find(([text]) => text.includes("with done as"))!;
+    expect(sql).toMatch(/select id, \$2, 'normal', 3, now\(\), now\(\), 0, \$4, 'homework' from done\s+on conflict \(id\) do nothing/);
+    expect(params?.[0]).toBe("hw-1");
+  });
+
+  it("saveSubmission rewrites the homework's one coach_session row after a retake (never a second row)", async () => {
+    route([{ match: "with saved as", rows: { id: "h1" } }]);
+    await hw.saveSubmission({
+      id: "h1",
+      userId: "u1",
+      submission: { transcript: "hello again", clipId: null, seconds: 41, heardNothing: true },
+      points: 15,
+    });
+    const [sql, params] = db.queryOne.mock.calls[0];
+    expect(sql).toContain("on conflict (id) do update");
+    expect(sql).toContain("where coach_session.user_id = excluded.user_id and coach_session.activity = 'homework'");
+    expect(sql).toContain("review_started_at = null");
+    // The "heard nothing" note goes once she hands in a real one
+    expect(JSON.parse(String(params?.[2]))).toEqual({ transcript: "hello again", clipId: null, seconds: 41 });
+  });
+
+  it("resetEmptySubmission re-opens an empty voice note and removes its points row, in one statement", async () => {
+    route([{ match: "with reset as", rows: { id: "h1" } }]);
+    expect(await hw.resetEmptySubmission("h1", "u1")).toBe(true);
+    const [sql, params] = db.queryOne.mock.calls[0];
+    expect(sql).toContain("set status = 'assigned', submitted_at = null, points = 0");
+    expect(sql).toContain("status = 'submitted'");
+    expect(sql).toMatch(/delete from coach_session where id in \(select id from reset\) and user_id = \$2 and activity = 'homework'/);
+    expect(params?.slice(0, 2)).toEqual(["h1", "u1"]);
+    expect(JSON.parse(String(params?.[2]))).toEqual({ transcript: "", clipId: null, seconds: 0, heardNothing: true });
+    route([]);
+    expect(await hw.resetEmptySubmission("h1", "u1")).toBe(false);
+  });
+
+  it("Today's plan treats a handed-in voice note and a unit exam as done today (not a drill homework)", async () => {
+    const { getPlanContext } = await import("./learner");
+    db.query.mockImplementation(async (text: string) =>
+      text.includes("select distinct activity") ? [{ activity: "homework" }, { activity: "exam" }, { activity: "shadow" }] : [],
+    );
+    const plan = await getPlanContext("u1", "2026-09-01", "Africa/Casablanca");
+    expect(plan.doneToday).toEqual(expect.arrayContaining(["homework", "exam", "shadow"]));
+    const [sql] = db.query.mock.calls.find(([text]) => text.includes("select distinct activity"))!;
+    expect(sql).toContain("not (activity = 'homework' and speaking_seconds = 0)");
   });
 });
