@@ -62,7 +62,7 @@ function silentWav() {
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-type Clip = { text: string; audio: Promise<Blob | null> | null };
+type Clip = { text: string; audio: Promise<Blob | null> | null; onStart?: () => void };
 
 export class Speaker {
   private audio: HTMLAudioElement | null = null;
@@ -119,11 +119,15 @@ export class Speaker {
     return this.playing || this.queue.length > 0;
   }
 
-  /** Queue one sentence. Server audio for the next sentence is fetched while the current one plays. */
-  enqueue(rawText: string) {
+  /**
+   * Queue one sentence. Server audio for the next sentence is fetched while the current one plays.
+   * `onStart` runs right before this sentence starts playing, so a screen can show the words as they
+   * are said. It never runs when stop() drops the sentence first, or when there is nothing to say.
+   */
+  enqueue(rawText: string, onStart?: () => void) {
     const text = cleanForSpeech(rawText);
     if (!text) return;
-    this.queue.push({ text, audio: null });
+    this.queue.push({ text, audio: null, onStart });
     this.prefetch();
     if (!this.playing) void this.playNext();
   }
@@ -222,6 +226,7 @@ export class Speaker {
     this.prefetch();
     const blob = await (clip.audio ?? this.fetchVoice(clip.text));
     if (generation !== this.generation) return;
+    clip.onStart?.();
     const played = blob && this.audio ? await this.playBlob(blob, generation) : false;
     if (generation !== this.generation) return;
     if (!played) await this.speakWithBrowser(clip.text, generation);

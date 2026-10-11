@@ -42,6 +42,19 @@ describe("one timezone for 'today'", () => {
     expect(db.query.mock.calls[0][1]).toEqual(["sou", "Europe/Paris"]);
   });
 
+  it("a start date after her 'today' (the database clock is ahead near midnight) never zeroes the weekly goal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-11T22:38:00Z")); // Sunday night in Casablanca, already Monday in Cairo
+    try {
+      const dash = await getDashboard("sou", "2026-10-12", "UTC");
+      expect(dash.weeklyGoal).toBeGreaterThanOrEqual(1);
+      expect(dash.daysThisWeek >= dash.weeklyGoal).toBe(false); // not "Goal reached" with 0 days
+      expect(dash.mamaPassesLeft).toBeGreaterThanOrEqual(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("looks up her profile zone when none is given", async () => {
     db.queryOne.mockImplementation(async (text: string) =>
       text.includes("select timezone from learner_profile") ? { timezone: "Asia/Tokyo" } : null,

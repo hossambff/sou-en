@@ -9,6 +9,10 @@ import { StartPanel } from "@/components/start-panel";
 import { WeekRing } from "@/components/week-ring";
 import { QuickAsk } from "@/components/quick-ask";
 import { InstallHint } from "@/components/pwa/install-hint";
+import { HomeworkCard } from "@/components/homework-card";
+import { KIND_INFO, type HomeworkKind } from "@/lib/homework";
+import { queryOne } from "@/lib/db";
+import { getAssessmentStatus } from "@/lib/assessment/status";
 
 function greetingEmoji(hour: number) {
   if (hour >= 5 && hour < 12) return "☀️";
@@ -24,9 +28,16 @@ export default async function HomePage() {
 
   // One clock for the greeting, the big button's default mode and Today's plan: her own timezone
   const timeZone = profileTimeZone(profile);
-  const [dash, planContext] = await Promise.all([
+  const [dash, planContext, nextHomework, assessment] = await Promise.all([
     getDashboard(user.id, profile.started_on, timeZone),
     getPlanContext(user.id, profile.started_on, timeZone),
+    queryOne<{ id: string; kind: HomeworkKind; title: string; title_ar: string | null }>(
+      `select id, kind, title, title_ar from homework
+        where user_id = $1 and status = 'assigned' and kind in ('speak', 'mission')
+        order by due_on, created_at limit 1`,
+      [user.id],
+    ),
+    getAssessmentStatus(user.id).catch(() => null),
   ]);
   const month = monthOfJourney(profile.started_on);
   const level = levelFor(dash.points);
@@ -68,8 +79,15 @@ export default async function HomePage() {
             totalSessions: dash.chats,
             dayIndex: dayNumber(localToday(timeZone)),
             scenarios,
+            placementPending: profile.placement_status === "pending",
+            unitExam: assessment?.unitExamReady ? { unitId: assessment.unit.id, title: assessment.unit.title } : null,
+            homework: nextHomework
+              ? { id: nextHomework.id, title: nextHomework.title, titleAr: nextHomework.title_ar, emoji: KIND_INFO[nextHomework.kind].emoji }
+              : null,
           }}
         />
+
+        <HomeworkCard userId={user.id} />
 
         <QuickAsk />
 

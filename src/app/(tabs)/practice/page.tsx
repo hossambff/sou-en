@@ -6,6 +6,7 @@ import { monthOfJourney } from "@/lib/progress";
 import { scenariosForLearner } from "@/lib/scenarios";
 import { QuickAsk } from "@/components/quick-ask";
 import { PracticeHub } from "./practice-hub";
+import { currentUnitFor } from "@/lib/curriculum";
 
 /** Mistakes from this window feed "Fix my mistakes" (the coach drills the most recent ones). */
 const RECENT_MISTAKE_DAYS = 30;
@@ -16,12 +17,14 @@ export default async function PracticePage() {
   if (!profile) redirect("/onboarding");
 
   const month = monthOfJourney(profile.started_on);
-  const counts = await queryOne<{ mistakes: number; due: number }>(
+  const counts = await queryOne<{ mistakes: number; due: number; homework: number }>(
     `select (select count(*)::int from error_log
               where user_id = $1 and created_at > now() - make_interval(days => $2)) as mistakes,
-            (select count(*)::int from vocab_item where user_id = $1 and due <= now()) as due`,
+            (select count(*)::int from vocab_item where user_id = $1 and due <= now()) as due,
+            (select count(*)::int from homework where user_id = $1 and status = 'assigned') as homework`,
     [user.id, RECENT_MISTAKE_DAYS],
   );
+  const unit = currentUnitFor(profile.current_unit, profile.cefr_level);
   const scenarios = scenariosForLearner(profile.cefr_level, month).map(({ scenario, harder }) => ({
     id: scenario.id,
     title: scenario.title,
@@ -38,6 +41,13 @@ export default async function PracticePage() {
       babyName={profile.baby_name}
       scenarios={scenarios}
       quickAsk={<QuickAsk />}
+      course={{
+        level: profile.cefr_level,
+        unitTitle: unit.title,
+        unitEmoji: unit.emoji,
+        placementDone: profile.placement_status === "done",
+      }}
+      openHomework={counts?.homework ?? 0}
     />
   );
 }

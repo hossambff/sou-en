@@ -85,6 +85,16 @@ export class Listener {
     return this.useServerStt && Date.now() >= this.serverSttRetryAt;
   }
 
+  /** The live mic stream after init() (shared with the realtime capture, so iOS opens the mic once). */
+  get mediaStream(): MediaStream | null {
+    return this.stream;
+  }
+
+  /** The AudioContext the mic is attached to after init() (the realtime capture adds its worklet here). */
+  get audioContext(): AudioContext | null {
+    return this.context;
+  }
+
   /** Ask for the mic (call from a tap). Concurrent calls share one request; a dead mic is re-acquired. */
   init(): Promise<void> {
     if (this.isLive()) {

@@ -34,6 +34,9 @@ export function PracticeHub(props: {
   babyName: string | null;
   scenarios: ScenarioTile[];
   quickAsk?: ReactNode;
+  /** Her level and current unit (from the placement test / exams) */
+  course: { level: string; unitTitle: string; unitEmoji: string; placementDone: boolean };
+  openHomework: number;
 }) {
   const [minutes, setMinutes] = useState(MINUTES.includes(props.defaultMinutes) ? props.defaultMinutes : 5);
   const [mode, setMode] = useState<SessionMode>("normal");
@@ -108,6 +111,48 @@ export function PracticeHub(props: {
                 <span className="text-[10px] leading-tight text-ink-soft">{option.hint}</span>
               </button>
             ))}
+          </div>
+        </section>
+
+        <section aria-label="Your course" className="space-y-3 animate-rise [animation-delay:60ms]">
+          <SectionTitle en="Your course" ar="الكورس ديالك" />
+          {props.course.placementDone ? (
+            <Tile
+              big
+              tone="saffron"
+              href="/exams"
+              emoji={props.course.unitEmoji}
+              title={`${props.course.level} · ${props.course.unitTitle}`}
+              ar="الوحدة ديالك دابا · الامتحانات"
+              hint="Your unit, your exams and your level. Pass the unit exam to move on."
+            />
+          ) : (
+            <Tile
+              big
+              tone="saffron"
+              href="/placement"
+              emoji="🧭"
+              title="Find your level"
+              ar="نعرفو المستوى ديالك"
+              hint="An 8-minute speaking test, no stress. Hossam adapts everything to you."
+            />
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <Tile
+              href="/homework"
+              emoji="📒"
+              title="Homework"
+              ar="الواجب"
+              hint={props.openHomework > 0 ? "Small tasks, reviewed by Hossam." : "All done for now 🌱"}
+              badge={props.openHomework > 0 ? String(props.openHomework) : undefined}
+            />
+            <Tile
+              href="/pronunciation"
+              emoji="👄"
+              title="Pronunciation Lab"
+              ar="مختبر النطق"
+              hint="Your tricky sounds, word by word."
+            />
           </div>
         </section>
 

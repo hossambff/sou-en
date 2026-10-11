@@ -15,6 +15,9 @@ const ACTIVITY_LABELS: Record<string, { label: string; emoji: string }> = {
   review: { label: "Word review", emoji: "🌱" },
   checkup: { label: "Monthly check-up", emoji: "🩺" },
   translate: { label: "How do I say…?", emoji: "💡" },
+  homework: { label: "Homework", emoji: "📒" },
+  exam: { label: "Unit exam", emoji: "🎓" },
+  placement: { label: "Placement test", emoji: "🧭" },
 };
 
 /** "Role-play: Order at a café ☕", "Free talk with Hossam 🗣️"… */

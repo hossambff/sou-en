@@ -2,7 +2,18 @@
 import { scenariosForLearner, sessionHref } from "./scenarios";
 import { isNightHour } from "./time-of-day";
 
-export type BiteKind = "checkup" | "review" | "shadow" | "chat" | "roleplay" | "retell" | "fixes" | "story";
+export type BiteKind =
+  | "placement"
+  | "homework"
+  | "exam"
+  | "checkup"
+  | "review"
+  | "shadow"
+  | "chat"
+  | "roleplay"
+  | "retell"
+  | "fixes"
+  | "story";
 
 /** The bits of a role-play scenario the plan needs (src/lib/scenarios.ts has the full shape). */
 export type PlanScenario = { id: string; title: string; titleAr: string; emoji: string };
@@ -47,6 +58,12 @@ export type PlanInput = {
    * leave it out and night hours (isNightHour) mean night mode.
    */
   mode?: PlanMode;
+  /** She hasn't taken (or skipped) the placement test: finding her level comes first. */
+  placementPending?: boolean;
+  /** Her next open homework item, if any. */
+  homework?: { id: string; title: string; titleAr: string | null; emoji: string } | null;
+  /** She has practiced her current unit enough to take its exam. */
+  unitExam?: { unitId: string; title: string } | null;
 };
 
 export type PlanMode = "normal" | "whisper" | "night";
@@ -110,7 +127,46 @@ function candidates(input: PlanInput): Candidate[] {
   const done = new Set(input.doneToday);
   const list: Candidate[] = [];
 
-  if (input.checkupDue && !night && !done.has("checkup")) {
+  if (input.placementPending && !night) {
+    list.push({
+      id: "placement",
+      title: "Find your level",
+      titleAr: "نعرفو المستوى ديالك",
+      emoji: "🧭",
+      minutes: 8,
+      href: "/placement",
+      reason: "A calm speaking test, so Hossam teaches you at exactly your level 🎯",
+      priority: 120,
+    });
+  }
+
+  if (input.homework && !done.has("homework")) {
+    list.push({
+      id: "homework",
+      title: input.homework.title,
+      titleAr: input.homework.titleAr ?? "الواجب",
+      emoji: input.homework.emoji,
+      minutes: 3,
+      href: `/homework/${input.homework.id}`,
+      reason: "Today's homework. Hossam will listen and give you feedback 📒",
+      priority: night ? 60 : 95,
+    });
+  }
+
+  if (input.unitExam && !night && !done.has("exam")) {
+    list.push({
+      id: "exam",
+      title: `Unit exam: ${input.unitExam.title}`,
+      titleAr: "امتحان الوحدة",
+      emoji: "🎓",
+      minutes: 5,
+      href: `/exams/unit/${input.unitExam.unitId}`,
+      reason: "You've practiced this unit. Pass it and move to the next one 🚀",
+      priority: 90,
+    });
+  }
+
+  if (input.checkupDue && !night && !done.has("checkup") && !input.placementPending) {
     list.push({
       id: "checkup",
       title: input.firstCheckup ? "Record your day-1 voice" : "Monthly check-up",

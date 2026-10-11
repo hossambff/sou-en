@@ -1,4 +1,6 @@
 import { requireLearner } from "@/lib/session";
+import { azureConfigured } from "@/lib/pronunciation/azure";
+import { basicConfigured } from "@/lib/pronunciation/basic";
 import { learnerUsesServerVoice } from "@/lib/tts";
 import { shadowRound } from "../drill-data";
 import type { DrillMode } from "../drill-ui";
@@ -18,6 +20,7 @@ export default async function ShadowPage({ searchParams }: PageProps<"/drill/sha
       serverVoice={await learnerUsesServerVoice(user.id)}
       serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
       speechRate={await learnerSpeechRate(user.id)}
+      pronunciation={azureConfigured() || basicConfigured()}
     />
   );
 }

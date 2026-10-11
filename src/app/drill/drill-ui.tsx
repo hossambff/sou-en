@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { Speaker } from "@/lib/voice/speaker";
 import { Listener, type ListenOptions, type ListenResult } from "@/lib/voice/listener";
+import { PcmCapture, UtteranceRecorder, canCapturePcm, type RecordOptions, type RecordResult } from "@/lib/voice/capture";
 import { MIC_NOTICE, type Notice } from "./listen-notice";
 
 export type DrillMode = "normal" | "whisper" | "night";
 
 /**
  * Hossam's voice + Sou's mic for a drill. Phrases use the cached server voice (saves quota),
- * falling back to the phone's voice.
+ * falling back to the phone's voice. record() keeps her voice as 16 kHz WAV for pronunciation scoring.
  */
 export function useDrillVoice({
   serverVoice,
@@ -25,23 +26,30 @@ export function useDrillVoice({
 }) {
   const speaker = useRef<Speaker | null>(null);
   const listener = useRef<Listener | null>(null);
+  const recorder = useRef<UtteranceRecorder | null>(null);
 
   useEffect(
     () => () => {
       speaker.current?.stop();
+      recorder.current?.cancel();
       listener.current?.dispose();
     },
     [],
   );
 
-  /** Call inside a tap: unlocks audio (iOS) and asks for the mic. False if the mic was refused. */
-  const prepare = useCallback(async () => {
+  /** Call inside a tap: unlocks Hossam's voice (iOS) without asking for the mic. */
+  const unlock = useCallback(() => {
     if (!speaker.current) {
       speaker.current = new Speaker(serverVoice, true);
       speaker.current.volume = mode === "night" ? 0.6 : mode === "whisper" ? 0.8 : 1;
     }
     speaker.current.rate = speechRate;
     speaker.current.unlock();
+  }, [serverVoice, mode, speechRate]);
+
+  /** Call inside a tap: unlocks audio (iOS) and asks for the mic. False if the mic was refused. */
+  const prepare = useCallback(async () => {
+    unlock();
     listener.current ??= new Listener(serverStt);
     try {
       await listener.current.init();
@@ -49,7 +57,7 @@ export function useDrillVoice({
     } catch {
       return false;
     }
-  }, [serverVoice, serverStt, mode, speechRate]);
+  }, [unlock, serverStt]);
 
   /** Say one phrase and wait until it's done (or stopped). Drops any listen still running ("🔊 again" mid-answer). */
   const say = useCallback(
@@ -57,6 +65,7 @@ export function useDrillVoice({
       const voice = speaker.current;
       if (!voice) return;
       listener.current?.cancel();
+      recorder.current?.cancel();
       voice.stop();
       voice.slow = slow || mode === "night";
       voice.enqueue(text);
@@ -74,14 +83,43 @@ export function useDrillVoice({
     [mode],
   );
 
+  /**
+   * Records one utterance as 16 kHz mono WAV (no transcription) for pronunciation scoring.
+   * { kind: "failed", reason: "unsupported" } when this phone can't (no AudioWorklet): use hear() instead.
+   */
+  const record = useCallback(
+    async (options: Omit<RecordOptions, "whisper">): Promise<RecordResult> => {
+      const mic = listener.current;
+      if (!mic) return { kind: "failed", reason: "mic" };
+      try {
+        await mic.init(); // re-asks if a phone call took the mic meanwhile
+      } catch {
+        return { kind: "failed", reason: "mic" };
+      }
+      const context = mic.audioContext;
+      const stream = mic.mediaStream;
+      if (!stream || !canCapturePcm(context)) return { kind: "failed", reason: "unsupported" };
+      mic.cancel();
+      recorder.current?.cancel();
+      const current = new UtteranceRecorder((handlers) => PcmCapture.start(context, stream, handlers));
+      recorder.current = current;
+      return current.record({ whisper: mode === "whisper", ...options });
+    },
+    [mode],
+  );
+
   const stopAll = useCallback(() => {
     speaker.current?.stop();
     listener.current?.cancel();
+    recorder.current?.cancel();
   }, []);
 
-  const doneTalking = useCallback(() => listener.current?.finish(), []);
+  const doneTalking = useCallback(() => {
+    listener.current?.finish();
+    recorder.current?.finish();
+  }, []);
 
-  return { prepare, say, hear, stopAll, doneTalking };
+  return { prepare, unlock, say, hear, record, stopAll, doneTalking };
 }
 
 export type OrbState = "ready" | "speaking" | "listening" | "busy" | "idle" | "paused";

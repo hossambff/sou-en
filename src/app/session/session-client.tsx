@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Speaker, takeSentences } from "@/lib/voice/speaker";
-import { Listener, type ListenFailureReason, type ListenResult } from "@/lib/voice/listener";
+import type { ListenFailureReason, ListenResult } from "@/lib/voice/listener";
+import { RealtimeListener } from "@/lib/voice/realtime";
 import { COMMAND_TOAST, detectCommand, type VoiceCommandKind } from "@/lib/voice/commands";
 import { ACTIVITY_INFO, type Activity } from "@/lib/scenarios";
 import type { SessionMode } from "@/lib/coach-prompt";
@@ -26,7 +27,18 @@ type Phase =
   | "ending"
   | "error";
 
-type Line = { role: "coach" | "sou"; text: string };
+type Line = {
+  id: number;
+  role: "coach" | "sou";
+  text: string;
+  /** Coach: what Hossam has said aloud so far; the rest appears sentence by sentence as he says it. */
+  spoken?: string;
+  /** Sou: her words while she's still speaking (the live transcript), for this listen turn. */
+  live?: number;
+};
+
+/** What a line shows right now. */
+const shownText = (line: Line) => line.spoken ?? line.text;
 type CoachRequest = {
   text?: string;
   event?: "start" | "resume" | "timeUp";
@@ -166,7 +178,8 @@ export function SessionClient(props: {
   const [level, setLevel] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [limitMinutes, setLimitMinutes] = useState(props.minutes);
-  const [showTranscript, setShowTranscript] = useState(false);
+  // The live transcript is on by default: her words appear as she speaks, Hossam's as he says them
+  const [showTranscript, setShowTranscript] = useState(true);
   const [browserLang, setBrowserLang] = useState(props.month <= 2 ? "ar-MA" : "en-US");
   const [problem, setProblem] = useState<Message | null>(null);
   const [hint, setHint] = useState<Message | null>(null);
@@ -179,7 +192,11 @@ export function SessionClient(props: {
   const [wake] = useState(() => new ScreenWake());
 
   const speaker = useRef<Speaker | null>(null);
-  const listener = useRef<Listener | null>(null);
+  const listener = useRef<RealtimeListener | null>(null);
+  const lineId = useRef(0);
+  const transcriptRef = useRef<HTMLOListElement | null>(null);
+  /** Follow new lines unless she scrolled up to read something. */
+  const stickToEnd = useRef(true);
   const turn = useRef(0); // bump to cancel whatever is in flight
   const abort = useRef<AbortController | null>(null);
   const lastRequest = useRef<CoachRequest | null>(null);
@@ -236,6 +253,12 @@ export function SessionClient(props: {
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [wake]);
 
+  // Keep the newest words in view while the transcript grows (unless she scrolled up to read)
+  useEffect(() => {
+    const list = transcriptRef.current;
+    if (list && stickToEnd.current) list.scrollTop = list.scrollHeight;
+  }, [lines, showTranscript]);
+
   // Leaving without Finish still saves her points and recap: the app being closed (pagehide → beacon),
   // or navigating away (unmount). If iOS kills the app silently, the server closes it later.
   useEffect(() => {
@@ -272,6 +295,29 @@ export function SessionClient(props: {
     [wake],
   );
 
+  function patchLine(id: number, patch: Partial<Line>) {
+    setLines((current) => current.map((line) => (line.id === id ? { ...line, ...patch } : line)));
+  }
+
+  /** Her words while she speaks: one live line per listen turn, replaced as the transcript grows. */
+  function showLive(listenTurn: number, text: string) {
+    setLines((current) => {
+      const index = current.findIndex((line) => line.live === listenTurn);
+      if (index < 0) return [...current, { id: ++lineId.current, role: "sou", text, live: listenTurn }];
+      return current.map((line, i) => (i === index ? { ...line, text } : line));
+    });
+  }
+
+  /** Ends a listen turn's live line: solid with her final words, or gone (silence, a command, cancelled). */
+  function settleLive(listenTurn: number, finalText: string | null) {
+    setLines((current) => {
+      const index = current.findIndex((line) => line.live === listenTurn);
+      if (finalText === null) return index < 0 ? current : current.filter((_, i) => i !== index);
+      if (index < 0) return [...current, { id: ++lineId.current, role: "sou", text: finalText }];
+      return current.map((line, i) => (i === index ? { id: line.id, role: "sou", text: finalText } : line));
+    });
+  }
+
   function showToast(kind: VoiceCommandKind) {
     window.clearTimeout(toastTimer.current);
     setToast({ id: Date.now(), ...COMMAND_TOAST[kind] });
@@ -288,12 +334,20 @@ export function SessionClient(props: {
           .hear({
             whisper: props.mode === "whisper",
             browserLang: browserLangRef.current,
+            // Context for the live transcriber: the end of what Hossam just said
+            previousText: lastCoachLine.current,
             onLevel: setLevel,
             onSpeechStart: () => myTurn === turn.current && go("hearing"),
+            onPartial: (text) => {
+              if (myTurn !== turn.current) return;
+              if (phaseRef.current === "listening") go("hearing");
+              showLive(myTurn, text);
+            },
           })
           .catch(() => micFailed)
       : micFailed;
-    if (myTurn !== turn.current) return;
+    if (myTurn !== turn.current) return settleLive(myTurn, null);
+    if (result.kind !== "heard") settleLive(myTurn, null);
     if (mic && !mic.usingServerStt) setSttServer(false); // show the Darija/English picker for the phone's recognition
 
     // Silence is not a failure: wait for her tap. A failure says what happened instead of looking like silence.
@@ -316,6 +370,7 @@ export function SessionClient(props: {
     const command = detectCommand(utterance.text, { lastCoachLine: lastCoachLine.current });
     if (command) showToast(command.kind);
     if (command?.local) {
+      settleLive(myTurn, null); // "repeat", "stop"… aren't part of the conversation
       if (command.kind === "pause") return babyPause();
       if (command.kind === "slower") {
         setSlow(true);
@@ -324,7 +379,7 @@ export function SessionClient(props: {
       return repeatLast();
     }
 
-    setLines((current) => [...current, { role: "sou", text: utterance.text }]);
+    settleLive(myTurn, utterance.text);
     void coachTurn({ text: utterance.text, speakingSeconds: utterance.seconds });
   }
 
@@ -338,6 +393,7 @@ export function SessionClient(props: {
     abort.current?.abort();
     abort.current = new AbortController();
     const timeUp = elapsedRef.current >= limitRef.current * 60 - WRAP_UP_SECONDS;
+    let lineAt = 0;
 
     try {
       const response = await fetch("/api/coach", {
@@ -358,9 +414,16 @@ export function SessionClient(props: {
       const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
       let buffer = "";
       let full = "";
-      setLines((current) => [...current, { role: "coach", text: "" }]);
-      const show = (text: string) =>
-        setLines((current) => [...current.slice(0, -1), { role: "coach", text: text.trim() }]);
+      const id = (lineAt = ++lineId.current);
+      setLines((current) => [...current, { id, role: "coach", text: "", spoken: "" }]);
+      const show = (text: string) => patchLine(id, { text: text.trim() });
+      // Each sentence appears on screen as Hossam starts saying it
+      const spoken: string[] = [];
+      const say = (sentence: string) =>
+        speaker.current!.enqueue(sentence, () => {
+          spoken.push(sentence);
+          patchLine(id, { spoken: spoken.join(" ") });
+        });
 
       while (true) {
         const { value, done } = await reader.read();
@@ -374,11 +437,14 @@ export function SessionClient(props: {
         show(full);
         const { sentences, rest } = takeSentences(buffer);
         buffer = rest;
-        sentences.forEach((sentence) => speaker.current!.enqueue(sentence));
-        if (sentences.length && phaseRef.current === "thinking") go("speaking");
+        sentences.forEach(say);
+        if (sentences.length && phaseRef.current === "thinking") {
+          go("speaking");
+          listener.current?.warm(); // get her live-transcript ticket ready while he talks
+        }
       }
       if (!full.trim()) throw new Error("The coach returned an empty reply");
-      takeSentences(buffer, true).sentences.forEach((sentence) => speaker.current!.enqueue(sentence));
+      takeSentences(buffer, true).sentences.forEach(say);
       if (speaker.current!.isSpeaking) go("speaking");
 
       await speaker.current!.drained();
@@ -399,6 +465,9 @@ export function SessionClient(props: {
       }
       setProblem(detail);
       go("error");
+    } finally {
+      // Interrupted, failed or done: the whole line can be read now
+      if (lineAt) patchLine(lineAt, { spoken: undefined });
     }
   }
 
@@ -496,7 +565,7 @@ export function SessionClient(props: {
     speaker.current.slow = slow;
     speaker.current.rate = props.speechRate;
     speaker.current.unlock(); // after volume: quiet modes start their Web Audio inside this tap
-    listener.current ??= new Listener(props.serverStt);
+    listener.current ??= new RealtimeListener(props.serverStt);
     const myStart = ++turn.current;
 
     try {
@@ -625,10 +694,17 @@ export function SessionClient(props: {
 
   const label = phase === "idle" && hint ? hint : PHASE_LABEL[phase];
   const resting = phase === "error" && problem?.retry === false;
-  const caption = [...lines].reverse().find((line) => line.role === "coach" && line.text)?.text;
+  // Hossam's latest line as said so far (falls back to the line before while a new one hasn't started)
+  const latestCoach = [...lines].reverse().find((line) => line.role === "coach" && shownText(line));
+  const caption = latestCoach ? shownText(latestCoach) : undefined;
+  const hasCoachLine = lines.some((line) => line.role === "coach" && line.text);
+  const visibleLines = lines.filter((line) => shownText(line));
+  const waitingForHer = (phase === "hearing" || phase === "transcribing") && !lines.some((line) => line.live !== undefined);
   const remaining = Math.max(0, limitMinutes * 60 - elapsed);
   const night = props.mode === "night";
   const active = phase === "listening" || phase === "hearing";
+  // With the transcript showing, the orb steps back a little to give the words room
+  const compact = showTranscript && phase !== "ready" && phase !== "cheer";
   const info = ACTIVITY_INFO[props.activity];
   const chip = props.scenario
     ? { emoji: props.scenario.emoji, en: props.scenario.title, ar: props.scenario.titleAr }
@@ -659,7 +735,10 @@ export function SessionClient(props: {
           {slow && !night ? " · 🐢" : ""}
         </span>
         <button
-          onClick={() => setShowTranscript((value) => !value)}
+          onClick={() => {
+            stickToEnd.current = true; // shown again: start at the newest words
+            setShowTranscript((value) => !value);
+          }}
           className="min-h-11 rounded-full px-3 text-sm text-ink-soft"
           aria-pressed={showTranscript}
         >
@@ -698,7 +777,9 @@ export function SessionClient(props: {
           disabled={
             phase === "thinking" || phase === "transcribing" || phase === "ending" || phase === "paused" || phase === "wrapped" || resting
           }
-          className="relative grid size-56 place-items-center rounded-full outline-none focus-visible:ring-4 focus-visible:ring-terra-soft"
+          className={`relative grid place-items-center rounded-full outline-none transition-[width,height] focus-visible:ring-4 focus-visible:ring-terra-soft ${
+            compact ? "size-44" : "size-56"
+          }`}
           aria-label={label.en}
         >
           {(phase === "speaking" || phase === "ready" || phase === "cheer") && (
@@ -710,7 +791,9 @@ export function SessionClient(props: {
             } ${phase === "thinking" || phase === "transcribing" ? "animate-spin-slow" : ""}`}
           />
           <span
-            className={`relative grid size-40 place-items-center rounded-full shadow-card transition-[background,transform] duration-200 ${
+            className={`relative grid place-items-center rounded-full shadow-card transition-[background,transform] duration-200 ${
+              compact ? "size-32" : "size-40"
+            } ${
               active
                 ? "bg-gradient-to-br from-mint to-[color-mix(in_oklab,var(--mint),black_20%)]"
                 : phase === "paused"
@@ -725,7 +808,7 @@ export function SessionClient(props: {
           </span>
         </button>
 
-        <p className="mt-6 text-center font-medium" aria-live="polite">
+        <p className={`${compact ? "mt-4" : "mt-6"} text-center font-medium`} aria-live="polite">
           {phase === "error" && problem ? problem.en : label.en}
         </p>
         <p className="ar text-center text-sm text-ink-soft" dir="rtl">
@@ -782,21 +865,43 @@ export function SessionClient(props: {
           </div>
         )}
 
-        {showTranscript && (
-          <ol className="mt-6 max-h-[40dvh] w-full space-y-2 overflow-y-auto">
-            {lines
-              .filter((line) => line.text)
-              .map((line, i) => (
-                <li
-                  key={i}
-                  dir="auto"
-                  className={`max-w-[85%] rounded-3xl px-4 py-2.5 text-[15px] leading-relaxed ${
-                    line.role === "coach" ? "bg-card shadow-card" : "ml-auto bg-mint-soft text-ink"
-                  }`}
-                >
-                  {line.role === "coach" ? <MixedText text={line.text} /> : line.text}
-                </li>
-              ))}
+        {showTranscript && phase !== "ready" && phase !== "cheer" && (visibleLines.length > 0 || waitingForHer) && (
+          <ol
+            ref={transcriptRef}
+            aria-label="Conversation"
+            onScroll={(event) => {
+              const list = event.currentTarget;
+              stickToEnd.current = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
+            }}
+            className="mt-5 max-h-[40dvh] w-full space-y-2 overflow-y-auto overscroll-contain pb-1"
+          >
+            {visibleLines.map((line) => (
+              <li
+                key={line.id}
+                dir="auto"
+                className={`max-w-[85%] rounded-3xl px-4 py-2.5 text-[15px] leading-relaxed transition-colors ${
+                  line.role === "coach"
+                    ? "bg-card shadow-card"
+                    : line.live !== undefined
+                      ? "ml-auto border border-dashed border-mint/50 bg-mint-soft/50 text-ink-soft"
+                      : "ml-auto bg-mint-soft text-ink"
+                }`}
+                aria-label={line.live !== undefined ? "What I hear so far" : undefined}
+              >
+                <MixedText text={shownText(line)} />
+              </li>
+            ))}
+            {waitingForHer && (
+              <li className="ml-auto flex w-fit gap-1 rounded-3xl border border-dashed border-mint/50 bg-mint-soft/50 px-4 py-3.5" aria-label="Listening">
+                {[0, 150, 300].map((delay) => (
+                  <span
+                    key={delay}
+                    className="size-1.5 animate-bounce rounded-full bg-mint motion-reduce:animate-none"
+                    style={{ animationDelay: `${delay}ms` }}
+                  />
+                ))}
+              </li>
+            )}
           </ol>
         )}
 
@@ -837,7 +942,7 @@ export function SessionClient(props: {
               </button>
               <button
                 onClick={repeatLast}
-                disabled={phase === "thinking" || phase === "transcribing" || phase === "cheer" || !caption}
+                disabled={phase === "thinking" || phase === "transcribing" || phase === "cheer" || !hasCoachLine}
                 className="rounded-3xl border border-line bg-card px-5 text-sm font-medium shadow-card active:scale-[0.98] disabled:opacity-50 motion-reduce:active:scale-100"
                 aria-label="Repeat what Hossam said"
               >

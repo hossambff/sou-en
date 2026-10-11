@@ -5,8 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useNightTheme } from "@/lib/use-night-theme";
 import { FOCUS_TIPS, type ShadowItem } from "@/lib/drill-phrases";
-import { TIER_COPY, drillTotals, scoreShadow, type ShadowScore, type WordMark } from "@/lib/scoring";
+import { TIER_COPY, drillTotals, scoreShadow, tierFor, type ShadowScore, type WordMark } from "@/lib/scoring";
+import { sttFailure } from "@/lib/voice/listener";
+import { assessPronunciation } from "@/lib/pronunciation/client";
+import type { PronunciationResult } from "@/lib/pronunciation/types";
 import { SpeakButton } from "@/components/speak-button";
+import { BasicEngineNote, SoundTipCard, SubScores, VerdictLegend, WordChips } from "../../pronunciation/pronunciation-ui";
 import {
   DrillMain,
   DrillOrb,
@@ -21,7 +25,7 @@ import {
   type OrbState,
   useSaveDrillOnLeave,
 } from "../drill-ui";
-import { listenNotice, type Notice } from "../listen-notice";
+import { MIC_NOTICE, listenNotice, type Notice } from "../listen-notice";
 
 type Phase =
   | "ready" // first tap unlocks audio + mic
@@ -41,7 +45,7 @@ const LABEL: Record<Phase, { en: string; ar: string }> = {
   speaking: { en: "Listen to Hossam… tap to skip", ar: "سمعي لحسام…" },
   listening: { en: "Your turn: say it like him!", ar: "دابا نتي، عاوديها بحالو!" },
   hearing: { en: "I hear you… tap when you're done", ar: "كنسمعك…" },
-  transcribing: { en: "Listening back…", ar: "كنشوف…" },
+  transcribing: { en: "Checking your sounds…", ar: "كنشوف النطق ديالك…" },
   idle: { en: "Tap the mic and say it", ar: "ضغطي على الميكرو وقوليها" },
   result: { en: "", ar: "" },
   paused: { en: "Paused for the baby", ar: "البيبي أولا ❤️" },
@@ -65,6 +69,26 @@ const ORB: Record<Phase, OrbState> = {
 };
 
 type Run = { id: string; startedAt: number; speaking: number; attempts: { target: string; score: number }[]; pending: Promise<unknown>[] };
+/** An attempt's result: real pronunciation scoring, or (when that can't run) the transcript comparison. */
+type Result = { kind: "pron"; pron: PronunciationResult } | { kind: "text"; score: ShadowScore; heard: string };
+
+/** After pronunciation scoring fails for a passing reason, use the transcript comparison this long. */
+const PRONUNCIATION_BACKOFF_MS = 60_000;
+
+/** The same recording as plain text (when pronunciation scoring is down). */
+async function transcribeWav(wav: Blob): Promise<{ ok: true; text: string } | { ok: false; status: number }> {
+  const form = new FormData();
+  form.append("audio", wav, "speech.wav");
+  try {
+    const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(20_000) : undefined;
+    const response = await fetch("/api/stt", { method: "POST", body: form, signal });
+    if (!response.ok) return { ok: false, status: response.status };
+    const data = (await response.json()) as { text?: unknown };
+    return { ok: true, text: typeof data.text === "string" ? data.text.trim() : "" };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
 type Summary = { points: number; average: number; speakingSeconds: number; saved: boolean };
 
 const emptyRun = (): Run => ({ id: "", startedAt: 0, speaking: 0, attempts: [], pending: [] });
@@ -75,6 +99,8 @@ export function ShadowClient(props: {
   serverVoice: boolean;
   serverStt: boolean;
   speechRate: number;
+  /** Pronunciation scoring is available (Azure, or ElevenLabs for the basic engine) */
+  pronunciation: boolean;
 }) {
   const router = useRouter();
   const voice = useDrillVoice(props);
@@ -82,7 +108,7 @@ export function ShadowClient(props: {
   const [items, setItems] = useState(props.initialItems);
   const [index, setIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>("ready");
-  const [result, setResult] = useState<{ score: ShadowScore; heard: string } | null>(null);
+  const [result, setResult] = useState<Result | null>(null);
   const [best, setBest] = useState<(number | null)[]>(() => props.initialItems.map(() => null));
   const [level, setLevel] = useState(0);
   const [slow, setSlow] = useState(props.mode === "night");
@@ -96,6 +122,8 @@ export function ShadowClient(props: {
   const indexRef = useRef(0);
   const slowRef = useRef(slow);
   const run = useRef<Run>(emptyRun());
+  /** Pronunciation scoring is skipped until then (Infinity = not on this phone / today) */
+  const pronOffUntil = useRef(props.pronunciation ? 0 : Infinity);
   useSaveDrillOnLeave(run, "shadow", props.mode);
 
   function go(next: Phase) {
@@ -122,30 +150,80 @@ export function ShadowClient(props: {
     if (!item) return;
     setNotice(null);
     go("listening");
+    const whisper = props.mode === "whisper";
+    const onSpeechStart = () => {
+      if (myTurn === turn.current) go("hearing");
+    };
+
+    if (Date.now() >= pronOffUntil.current) {
+      // Real pronunciation scoring: keep her voice, score each word and sound
+      const recording = await voice.record({ noSpeechTimeoutMs: 12_000, onLevel: setLevel, onSpeechStart });
+      if (myTurn !== turn.current) return;
+      if (recording.kind === "silence") return go("idle");
+      if (recording.kind === "failed" && recording.reason === "mic") {
+        setNotice(MIC_NOTICE);
+        return go("idle");
+      }
+      if (recording.kind === "heard") {
+        go("transcribing");
+        const outcome = await assessPronunciation({ audio: recording.wav, target: item.en, source: "shadow", seconds: recording.seconds });
+        if (myTurn !== turn.current) return;
+        if (outcome.ok) return showResult(item.en, itemIndex, recording.seconds, { kind: "pron", pron: outcome.result });
+        if (outcome.reason === "unclear") {
+          setNotice(listenNotice({ kind: "unclear", seconds: recording.seconds }, { whisper }));
+          return go("idle");
+        }
+        // Can't score sounds now: the transcript comparison (the old way) on the same recording
+        pronOffUntil.current = outcome.reason === "limit" ? Infinity : Date.now() + PRONUNCIATION_BACKOFF_MS;
+        const transcript = outcome.reason === "limit" ? ({ ok: false, status: 429 } as const) : await transcribeWav(recording.wav);
+        if (myTurn !== turn.current) return;
+        if (transcript.ok && transcript.text) {
+          const heard = transcript.text;
+          return showResult(item.en, itemIndex, recording.seconds, { kind: "text", score: scoreShadow(item.en, heard), heard });
+        }
+        setNotice(
+          listenNotice(transcript.ok ? { kind: "unclear", seconds: recording.seconds } : sttFailure(transcript.status, recording.seconds), {
+            whisper,
+          }),
+        );
+        return go("idle");
+      }
+      // This phone can't keep the recording (no AudioWorklet): the transcript comparison from now on
+      pronOffUntil.current = Infinity;
+    }
+
     const heard = await voice.hear({
       browserLang: "en-US",
       noSpeechTimeoutMs: 12_000,
       onLevel: setLevel,
-      onSpeechStart: () => {
-        if (myTurn === turn.current) go("hearing");
-      },
+      onSpeechStart,
     });
     if (myTurn !== turn.current) return;
     if (heard.kind !== "heard") {
       // Not heard clearly / can't listen right now: say so, never just reset
-      setNotice(listenNotice(heard, { whisper: props.mode === "whisper" }));
+      setNotice(listenNotice(heard, { whisper }));
       return go("idle");
     }
+    showResult(item.en, itemIndex, heard.seconds, { kind: "text", score: scoreShadow(item.en, heard.text), heard: heard.text });
+  }
 
-    const score = scoreShadow(item.en, heard.text);
-    run.current.speaking += heard.seconds;
-    run.current.attempts.push({ target: item.en, score: score.score });
-    run.current.pending.push(
-      postJson("/api/drill/attempt", { kind: "shadow", runId: run.current.id, target: item.en, heard: heard.text }),
-    );
-    setBest((current) => current.map((value, i) => (i === itemIndex ? Math.max(value ?? 0, score.score) : value)));
-    setResult({ score, heard: heard.text });
+  /** Counts the attempt (points are saved by the server from what was heard) and shows how it went. */
+  function showResult(target: string, itemIndex: number, seconds: number, attempt: Result) {
+    const score = attempt.kind === "pron" ? attempt.pron.score : attempt.score.score;
+    const heard = attempt.kind === "pron" ? attempt.pron.heard : attempt.heard;
+    run.current.speaking += seconds;
+    run.current.attempts.push({ target, score });
+    run.current.pending.push(postJson("/api/drill/attempt", { kind: "shadow", runId: run.current.id, target, heard }));
+    setBest((current) => current.map((value, i) => (i === itemIndex ? Math.max(value ?? 0, score) : value)));
+    setResult(attempt);
     go("result");
+  }
+
+  /** Tap a word chip or a minimal pair: hear it slowly (cached voice). */
+  function hearWord(word: string) {
+    if (!word) return;
+    voice.unlock();
+    void voice.say(word, true);
   }
 
   async function begin() {
@@ -320,6 +398,23 @@ export function ShadowClient(props: {
             </ul>
           </section>
 
+          {props.pronunciation && (
+            <Link
+              href="/pronunciation"
+              className="flex min-h-11 items-center justify-between rounded-3xl border border-line bg-card px-4 py-3 text-sm shadow-card motion-safe:active:scale-[0.98]"
+            >
+              <span>
+                🎯 <span className="font-medium">Your sounds</span> in the Pronunciation Lab
+                <span className="ar block text-xs text-ink-soft" dir="rtl">
+                  شوفي الأصوات ديالك ف مختبر النطق
+                </span>
+              </span>
+              <span aria-hidden className="text-ink-soft">
+                ›
+              </span>
+            </Link>
+          )}
+
           {notice && <NoticeText notice={notice} className="mx-auto" />}
           <div className="grid grid-cols-2 gap-3 pb-4">
             <Link
@@ -380,19 +475,30 @@ export function ShadowClient(props: {
           >
             {item.source === "garden" ? "🌱" : item.source === "fix" ? "✨" : "🎯"} {tip.label}
           </span>
-          <p className="font-display mt-3 text-[1.7rem] font-semibold leading-snug tracking-tight">
-            <PhraseWords text={item.en} marks={result?.score.words ?? null} />
-          </p>
+          {result?.kind === "pron" ? (
+            <div className="font-display mt-3 text-[1.55rem] font-semibold leading-snug tracking-tight">
+              <WordChips words={result.pron.words} onHear={hearWord} />
+            </div>
+          ) : (
+            <p className="font-display mt-3 text-[1.7rem] font-semibold leading-snug tracking-tight">
+              <PhraseWords text={item.en} marks={result?.kind === "text" ? result.score.words : null} />
+            </p>
+          )}
           {item.ar && (
             <p dir="rtl" className="ar mt-2 text-ink-soft">
               {item.ar}
             </p>
           )}
-          {result && result.score.words.some((w) => w.status === "close" || w.status === "missed") && <Legend />}
+          {result?.kind === "pron" && result.pron.words.some((w) => w.verdict !== "good") && <VerdictLegend words={result.pron.words} />}
+          {result?.kind === "text" && result.score.words.some((w) => w.status === "close" || w.status === "missed") && <Legend />}
         </article>
 
         {phase === "result" && result ? (
-          <ResultPanel result={result} tip={tip} />
+          result.kind === "pron" ? (
+            <PronunciationPanel result={result.pron} tip={tip} onHear={hearWord} />
+          ) : (
+            <ResultPanel result={result} tip={tip} />
+          )
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center py-4">
             <DrillOrb
@@ -508,6 +614,52 @@ function Legend() {
         <span className="text-terra/70">●</span> listen again
       </span>
     </p>
+  );
+}
+
+function PronunciationPanel({
+  result,
+  tip,
+  onHear,
+}: {
+  result: PronunciationResult;
+  tip: { en: string; ar: string };
+  onHear: (word: string) => void;
+}) {
+  const copy = TIER_COPY[tierFor(result.score, result.words.some((w) => w.verdict !== "missed"))];
+  const sound = result.sounds[0];
+  return (
+    <div className="mt-4 flex flex-1 flex-col gap-3 animate-rise">
+      <div className="flex items-center gap-4 rounded-3xl border border-line bg-card p-4 shadow-card">
+        <ScoreRing score={result.score} />
+        <div className="min-w-0">
+          <p className="font-medium">
+            {copy.emoji} {copy.en}
+          </p>
+          <p className="ar text-sm text-ink-soft" dir="rtl">
+            {copy.ar}
+          </p>
+          {result.heard && (
+            <p className="mt-1.5 truncate text-xs text-ink-soft" dir="auto">
+              I heard: “{result.heard}”
+            </p>
+          )}
+          <SubScores result={result} />
+        </div>
+      </div>
+      {result.score < 90 &&
+        (sound ? (
+          <SoundTipCard sound={sound} words={result.words} onHear={onHear} />
+        ) : (
+          <div className="rounded-3xl bg-saffron-soft p-4 text-sm leading-relaxed text-ink">
+            <p>💡 {tip.en}</p>
+            <p className="ar mt-1 text-ink-soft" dir="rtl">
+              {tip.ar}
+            </p>
+          </div>
+        ))}
+      {result.engine === "basic" && result.score < 90 && <BasicEngineNote />}
+    </div>
   );
 }
 

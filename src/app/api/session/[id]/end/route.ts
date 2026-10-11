@@ -4,6 +4,7 @@ import { getLearnerUserId } from "@/lib/session";
 import { queryOne } from "@/lib/db";
 import { notifySquadOfWin } from "@/lib/push";
 import { writeRecap } from "@/lib/recap";
+import { assignHomeworkAfterSession } from "@/lib/homework";
 import { SESSION_POINTS_SQL } from "@/lib/session-maintenance";
 
 export const maxDuration = 60;
@@ -38,5 +39,7 @@ export async function POST(_request: Request, { params }: RouteContext<"/api/ses
 
   // The recap is a bonus: her points are already saved, so a slow or failed summary costs nothing else
   await writeRecap(id);
+  // A homework item built from today's golden fixes (needs the recap first). Never throws.
+  await assignHomeworkAfterSession(userId, id);
   return Response.json({ ok: true });
 }

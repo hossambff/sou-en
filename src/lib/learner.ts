@@ -94,13 +94,14 @@ export async function getDashboard(userId: string, startedOn: string, timeZone?:
   const dayMs = 86_400_000;
   const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short" }).format(new Date());
   const weekStart = new Date(Date.parse(today) - ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(weekday) * dayMs);
-  const countFrom = Math.max(weekStart.getTime(), Date.parse(startedOn));
+  // A start date "after today" (the database's clock is ahead of hers near midnight) counts as today
+  const countFrom = Math.min(Math.max(weekStart.getTime(), Date.parse(startedOn)), Date.parse(today));
   const daysBeforeToday = Math.max(0, Math.round((Date.parse(today) - countFrom) / dayMs));
   const practicedBeforeToday = week.filter((w) => w.day < today).length;
   const passesUsed = Math.max(0, daysBeforeToday - practicedBeforeToday);
   // Joined mid-week? Scale the goal down so it's still reachable.
   const daysAvailable = 7 - Math.round((countFrom - weekStart.getTime()) / dayMs);
-  const weeklyGoal = Math.min(WEEKLY_GOAL_DAYS, daysAvailable);
+  const weeklyGoal = Math.max(1, Math.min(WEEKLY_GOAL_DAYS, daysAvailable));
 
   return {
     points: totals?.points ?? 0,

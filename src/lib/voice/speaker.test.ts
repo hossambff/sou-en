@@ -240,6 +240,24 @@ describe("Speaker", () => {
     expect(drained).toBe(true);
   });
 
+  it("onStart tells when each sentence starts, and never for sentences dropped by stop()", async () => {
+    const { synth } = fakeBrowser();
+    const speaker = new Speaker(false);
+    const started: string[] = [];
+    speaker.enqueue("First sentence here.", () => started.push("first"));
+    speaker.enqueue("Second sentence here.", () => started.push("second"));
+    speaker.enqueue("😊", () => started.push("emoji")); // nothing to say: never "starts"
+    await vi.advanceTimersByTimeAsync(0);
+    expect(started).toEqual(["first"]);
+    synth.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(started).toEqual(["first", "second"]);
+    speaker.enqueue("Third sentence here.", () => started.push("third"));
+    speaker.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(started).toEqual(["first", "second"]);
+  });
+
   it("keeps waiting while the engine is really still speaking", async () => {
     const { synth } = fakeBrowser();
     const speaker = new Speaker(false);

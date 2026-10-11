@@ -8,6 +8,7 @@ const auth = vi.hoisted(() => ({ userId: "user-1" as string | null }));
 const llm = vi.hoisted(() => ({ structured: vi.fn() }));
 const push = vi.hoisted(() => ({ notifySquadOfWin: vi.fn(async () => {}) }));
 const background = vi.hoisted(() => ({ tasks: [] as Array<() => unknown> }));
+const homework = vi.hoisted(() => ({ assignHomeworkAfterSession: vi.fn(async () => {}) }));
 
 vi.mock("server-only", () => ({}));
 vi.mock("next/server", () => ({ after: (task: () => unknown) => background.tasks.push(task) }));
@@ -15,6 +16,7 @@ vi.mock("@/lib/session", () => ({ getLearnerUserId: async () => auth.userId }));
 vi.mock("@/lib/db", () => db);
 vi.mock("@/lib/push", () => push);
 vi.mock("@/lib/claude", () => ({ structured: llm.structured }));
+vi.mock("@/lib/homework", () => homework);
 
 const { POST } = await import("./route");
 
@@ -56,8 +58,9 @@ describe("POST /api/session/[id]/end", () => {
     });
     const response = await call();
     expect(response.status).toBe(200);
-    // claim (ended_at + points) → the recap reads the ended session → the Claude recap
+    // claim (ended_at + points) → the recap reads the ended session → the Claude recap → homework from its fixes
     expect(order).toEqual(["claim", "other", "recap"]);
+    expect(homework.assignHomeworkAfterSession).toHaveBeenCalledWith("user-1", ID);
     const [sql, params] = claim()!;
     expect(sql).toMatch(/points = case when exists/);
     expect(sql).toMatch(/ended_at is null/);

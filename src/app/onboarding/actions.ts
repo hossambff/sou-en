@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { getLearnerMember, getMember, mayBeLearner, requireUser } from "@/lib/session";
 import { pool } from "@/lib/db";
+import { localToday } from "@/lib/learner";
 
 const learnerSchema = z.object({
   firstName: z.string().trim().min(1).max(60),
@@ -33,11 +34,12 @@ export async function saveLearner(formData: FormData) {
       [user.id, data.firstName],
     );
     await client.query(
-      `insert into learner_profile (user_id, first_name, baby_name, baby_birthdate, why_english)
-       values ($1, $2, $3, $4, $5)
+      `insert into learner_profile (user_id, first_name, baby_name, baby_birthdate, why_english, started_on)
+       values ($1, $2, $3, $4, $5, $6)
        on conflict (user_id) do update set first_name = excluded.first_name, baby_name = excluded.baby_name,
          baby_birthdate = excluded.baby_birthdate, why_english = excluded.why_english`,
-      [user.id, data.firstName, data.babyName ?? null, data.babyBirthdate ?? null, data.why.join(", ") || null],
+      // Day 1 is HER today (Morocco), not the database server's date
+      [user.id, data.firstName, data.babyName ?? null, data.babyBirthdate ?? null, data.why.join(", ") || null, localToday()],
     );
     await client.query("commit");
   } catch (error) {
