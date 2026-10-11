@@ -46,7 +46,12 @@ export async function saveLearner(formData: FormData) {
   } finally {
     client.release();
   }
-  redirect("/");
+  // New learners take the placement test so everything starts at her real level
+  const placement = await pool.query<{ placement_status: string }>(
+    `select placement_status from learner_profile where user_id = $1`,
+    [user.id],
+  );
+  redirect(placement.rows[0]?.placement_status === "pending" ? "/placement" : "/");
 }
 
 export async function savePartner(formData: FormData) {

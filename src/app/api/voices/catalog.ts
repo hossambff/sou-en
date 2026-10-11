@@ -10,7 +10,7 @@ export function defaultVoiceId() {
 }
 
 /**
- * Voices usable on this ElevenLabs plan (premade/default voices), cached in memory for an hour.
+ * Voices in this ElevenLabs account (premade + library voices added to it), cached in memory for an hour.
  * Returns [] when no API key is set; serves the last good list if ElevenLabs is unreachable.
  */
 export async function usableVoices(): Promise<CoachVoice[]> {
@@ -20,7 +20,7 @@ export async function usableVoices(): Promise<CoachVoice[]> {
   if (cache && age < (cache.ok ? CACHE_MS : RETRY_MS)) return cache.voices;
 
   try {
-    const response = await fetch("https://api.elevenlabs.io/v2/voices?page_size=100&voice_type=default", {
+    const response = await fetch("https://api.elevenlabs.io/v2/voices?page_size=100", {
       headers: { "xi-api-key": key },
       signal: AbortSignal.timeout(8000),
     });

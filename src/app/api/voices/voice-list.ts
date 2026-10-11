@@ -44,8 +44,9 @@ export function splitVoiceName(raw: string) {
 }
 
 /**
- * Turn ElevenLabs' /v2/voices response into the picker list: premade voices only (the free plan
- * can't use library voices over the API), male and female only, Hossam-like male voices first.
+ * Turn ElevenLabs' /v2/voices response into the picker list: the account's voices (premade plus the
+ * library voices added to the account — paid plans can use those over the API), male and female only.
+ * Order: default first, then Moroccan voices, then other male voices.
  */
 export function parseVoices(payload: unknown, defaultVoiceId: string | null): CoachVoice[] {
   const voices = (payload as { voices?: RawVoice[] } | null)?.voices;
@@ -58,8 +59,6 @@ export function parseVoices(payload: unknown, defaultVoiceId: string | null): Co
     const gender = text(voice.labels?.gender)?.toLowerCase();
     if (!id || !rawName || seen.has(id) || !/^[A-Za-z0-9]{8,40}$/.test(id)) continue;
     if (gender !== "male" && gender !== "female") continue;
-    const category = text(voice.category);
-    if (category && category !== "premade" && id !== defaultVoiceId) continue;
     seen.add(id);
     const { name, tagline } = splitVoiceName(rawName);
     list.push({
@@ -75,6 +74,7 @@ export function parseVoices(payload: unknown, defaultVoiceId: string | null): Co
   return list.sort(
     (a, b) =>
       Number(b.isDefault) - Number(a.isDefault) ||
+      Number(b.accent === "Moroccan") - Number(a.accent === "Moroccan") ||
       Number(b.gender === "male") - Number(a.gender === "male") ||
       a.name.localeCompare(b.name),
   );

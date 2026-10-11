@@ -1,4 +1,5 @@
 import "server-only";
+import type { SkillScores } from "./curriculum/types";
 import { query, queryOne } from "./db";
 import { WEEKLY_GOAL_DAYS, journeyMonthNumber, monthOfJourney } from "./progress";
 import { safeTimeZone } from "./reminders";
@@ -45,12 +46,17 @@ export type LearnerProfile = {
   default_minutes?: number;
   /** Her phone's IANA timezone (always loaded by getProfile). Use profileTimeZone(profile) to read it safely. */
   timezone?: string;
+  /** Curriculum unit she's on (null until placement/first session; use currentUnitFor()). */
+  current_unit?: string | null;
+  /** 0–100 per skill from the placement test and exams. */
+  skill_scores?: SkillScores;
+  placement_status?: "pending" | "skipped" | "done";
 };
 
 export function getProfile(userId: string) {
   return queryOne<LearnerProfile>(
     `select user_id, first_name, baby_name, baby_birthdate::text, why_english, darija_script,
-            started_on::text, cefr_level, default_minutes, timezone
+            started_on::text, cefr_level, default_minutes, timezone, current_unit, skill_scores, placement_status
        from learner_profile where user_id = $1`,
     [userId],
   );

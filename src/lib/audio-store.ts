@@ -1,7 +1,7 @@
 import "server-only";
 import { query, queryOne } from "./db";
 
-export type ClipKind = "checkup" | "cheer";
+export type ClipKind = "checkup" | "cheer" | "placement" | "exam" | "homework" | "pronunciation";
 
 export const MAX_CLIP_BYTES = 3 * 1024 * 1024; // ~3 minutes of opus; under Vercel's 4.5 MB body limit
 const DAILY_CLIPS_PER_USER = 40;
@@ -62,11 +62,18 @@ export async function loadClipFor(id: string, viewerId: string) {
 export async function deleteOrphanClips() {
   const rows = await query<{ id: string }>(
     `delete from audio_clip c
-      where c.created_at < now() - (case when c.kind = 'checkup' then interval '7 days' else interval '1 day' end)
+      where c.created_at < now() - (case when c.kind = 'cheer' then interval '1 day' else interval '7 days' end)
         and not exists (select 1 from cheer ch where ch.clip_id = c.id)
         and not exists (
           select 1 from checkup k, jsonb_array_elements(coalesce(k.answers, '[]'::jsonb)) a
            where k.user_id = c.user_id and a->>'clipId' = c.id::text)
+        and not exists (
+          select 1 from placement_test p, jsonb_array_elements(coalesce(p.answers, '[]'::jsonb)) a
+           where p.user_id = c.user_id and a->>'clipId' = c.id::text)
+        and not exists (
+          select 1 from exam e, jsonb_array_elements(coalesce(e.answers, '[]'::jsonb)) a
+           where e.user_id = c.user_id and a->>'clipId' = c.id::text)
+        and not exists (select 1 from homework h where h.user_id = c.user_id and h.submission->>'clipId' = c.id::text)
       returning c.id`,
   );
   return rows.length;

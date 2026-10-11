@@ -1,4 +1,5 @@
 import { CITIES, babyAgeLabel, englishShare } from "./progress";
+import { SKILLS, currentUnitFor, englishShareForLevel, getSound, type SkillScores } from "./curriculum";
 import { getScenario, isActivity, type Activity, type Scenario } from "./scenarios";
 import type { CoachContext } from "./learner";
 
@@ -118,6 +119,23 @@ const MODE_NOTES: Record<SessionMode, string> = {
     "NIGHT MODE: it's the middle of the night, probably a feed. She is exhausted. Lower the demand: mostly listening, gentle repetition of known words, tiny stories. Never push. One short sentence from her is a win.",
 };
 
+/** How Hossam's English sounds at each level. */
+const LEVEL_STYLE = {
+  A1: "very short sentences, the most common words, present tense, lots of repetition, slow and clear.",
+  A2: "short sentences, everyday words, present and past simple, repeat key phrases.",
+  B1: "natural everyday English, some longer sentences, past and future, ask follow-up questions.",
+  B2: "natural, fluent English with idioms and phrasal verbs, push her to give opinions and longer answers.",
+  C1: "fully natural English at native speed, nuance, humour and wordplay — challenge her.",
+} as const;
+
+/** The 1–2 skills furthest behind (only when we have scores). */
+function weakestSkills(scores: SkillScores | undefined) {
+  if (!scores) return [];
+  const known = SKILLS.filter((skill) => typeof scores[skill] === "number");
+  if (known.length < 3) return [];
+  return [...known].sort((a, b) => (scores[a] ?? 0) - (scores[b] ?? 0)).slice(0, 2);
+}
+
 export function buildCoachInstructions(
   ctx: CoachContext,
   session: {
@@ -131,7 +149,11 @@ export function buildCoachInstructions(
   },
 ) {
   const { profile, month } = ctx;
-  const english = englishShare(month);
+  // Her LEVEL decides the mix (a B1 learner gets mostly English from day 1); the monthly fade only adds English
+  const english = Math.max(englishShare(month), englishShareForLevel(profile.cefr_level));
+  const unit = currentUnitFor(profile.current_unit, profile.cefr_level);
+  const sound = getSound(unit.sound);
+  const focus = weakestSkills(profile.skill_scores);
   const city = CITIES[month - 1];
   const babyAge = babyAgeLabel(profile.baby_birthdate);
   const minutesLeft = Math.max(0, session.minutesPlanned - session.elapsedSeconds / 60);
@@ -148,9 +170,17 @@ You are speaking out loud through text-to-speech. Everything you write will be S
 - You never rush her, never sigh, and never say "wrong" flatly.
 
 # Who she is
-- Native Darija speaker, fluent in Egyptian Arabic and French, and a beginner in English working toward fluency.
+- Native Darija speaker, fluent in Egyptian Arabic and French, learning English toward fluency, with a strong focus on SPEAKING.
 - She has a baby${profile.baby_name ? ` named ${profile.baby_name}` : ""}${babyAge ? ` (${babyAge} old)` : ""}. She is busy, tired and often overwhelmed. Showing up at all is a win.
 ${profile.why_english ? `- Why she wants English: ${profile.why_english}\n` : ""}- Her current level estimate: ${profile.cefr_level}.
+
+# Her course right now (adapt everything to this)
+- Level: ${profile.cefr_level}. Unit "${unit.title}" — goal: ${unit.canDo}
+- Phrases to make automatic this unit (weave 2–3 into the conversation and get her to SAY them; when she learns one, call save_word): ${unit.chunks.map((c) => `"${c.en}" (${c.ar})`).join("; ")}
+- Grammar focus: ${unit.grammar.focus}. Recast mistakes on this point first.
+- Sound focus: ${sound ? `${sound.title}: ${sound.tipEn}` : unit.sound}. When she mispronounces it, model the word slowly once and ask her to repeat.
+${focus.length ? `- Her weakest skills (from her placement test and exams): ${focus.join(", ")}. Give these a little extra attention.
+` : ""}- Speak at her level: ${LEVEL_STYLE[profile.cefr_level as keyof typeof LEVEL_STYLE] ?? LEVEL_STYLE.A1}
 
 # Language mix: VERY IMPORTANT
 - This is month ${month} of her 6-month journey (city: ${city.name}, theme: "${city.theme}").
