@@ -4,7 +4,8 @@ import type { Chunk, SoundId, Unit } from "./curriculum/types";
 import type { FocusSound, ShadowItem } from "./drill-phrases";
 import type { PronunciationResult, WordVerdict } from "./pronunciation/types";
 import { query, queryOne } from "./db";
-import { CONVERSATION_ACTIVITIES, getProfile, localToday, profileTimeZone } from "./learner";
+import { CONVERSATION_ACTIVITIES, getProfile, learnerTimeZone, localToday, profileTimeZone } from "./learner";
+import { shadowHomeworkHref } from "./plan";
 import { averageBest } from "./scoring";
 
 // Homework: small assignments between sessions, built from her CURRENT curriculum unit (no Claude needed
@@ -41,6 +42,11 @@ export type HomeworkPayload = {
   goal?: number;
   /** shadow: phrases from the unit to listen to */
   chunks?: Chunk[];
+  /**
+   * shadow: only Shadow Me tries on `chunks` count toward it (items made since Shadow Me could open a
+   * homework's own phrases). Older items, without this, count every Shadow Me try, as they always did.
+   */
+  chunkFilter?: boolean;
 };
 
 /** homework.submission */
@@ -52,10 +58,16 @@ export type Submission = {
   /** Server speech-to-text already ran on this clip (even if it heard nothing) */
   sttTried?: boolean;
   /**
-   * Her last voice note had no words in it (silence, a 1-second tap, or nothing could transcribe it):
-   * the item went back to 'assigned' so she can record it again, and the page says so gently.
+   * Her last voice note had no words in it (silence, a 1-second tap) or couldn't be read at all: the
+   * item went back to 'assigned' so she can record it again, and the page says so gently.
    */
   heardNothing?: boolean;
+  /** With heardNothing: the speech-to-text couldn't open that recording (a broken or unsupported file) */
+  unreadable?: boolean;
+  /** She typed what she said, because the recording couldn't be transcribed */
+  typed?: boolean;
+  /** How many times Hossam's review has started on this hand-in (background retries stop at MAX_AUTO_REVIEWS) */
+  reviewAttempts?: number;
   /** shadow / words: drill attempts counted */
   attempts?: number;
 };
@@ -272,9 +284,10 @@ export function shadowFromUnit(unit: Unit, n: number, today: string): NewHomewor
     unitId: unit.id,
     title: `Shadow ${DRILL_GOAL} phrases`,
     titleAr: `عاودي ${DRILL_GOAL} دالجمل مور حسام`,
-    instructions: `Open Shadow Me and repeat ${DRILL_GOAL} phrases after Hossam. Listen first, then copy his music.`,
-    instructionsAr: `حلي Shadow Me وعاودي ${DRILL_GOAL} دالجمل مور حسام. سمعي مزيان، ومن بعد قلديه.`,
-    payload: { goal: DRILL_GOAL, chunks: pickChunks(unit.chunks, n) },
+    // Only tries on THESE phrases count: the "Open Shadow Me" button below (and Today's plan) open them
+    instructions: `Tap “Open Shadow Me” below and repeat these ${DRILL_GOAL} phrases after Hossam. Listen first, then copy his music. Tries on these phrases are the ones that count.`,
+    instructionsAr: `ضغطي على "Open Shadow Me" لتحت وعاودي هاد ${DRILL_GOAL} دالجمل مور حسام. سمعي مزيان، ومن بعد قلديه. غير المحاولات على هاد الجمل اللي كيتحسبو.`,
+    payload: { goal: DRILL_GOAL, chunks: pickChunks(unit.chunks, n), chunkFilter: true },
     dueOn: dueOnFor("shadow", today),
     dedupeKey: `unit:${unit.id}:shadow:${n}`,
   };
@@ -282,12 +295,8 @@ export function shadowFromUnit(unit: Unit, n: number, today: string): NewHomewor
 
 // ── Shadow homework → Shadow Me with the unit's phrases ─────────────────────
 
-/** The Shadow Me door for one shadow homework item: the drill builds its round from that item's phrases. */
-export function shadowHomeworkHref(id: string, night = false) {
-  const params = new URLSearchParams({ homework: id });
-  if (night) params.set("mode", "night");
-  return `/drill/shadow?${params}`;
-}
+/** The Shadow Me door for one shadow homework item (pure; it lives with Today's plan, which links it too). */
+export { shadowHomeworkHref };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -633,12 +642,15 @@ export async function skipStaleHomework(userId: string, today: string) {
 
 /**
  * Her unit changed (placement, a passed exam): open unit items from any other unit quietly drop off
- * ('skipped', like stale ones), so the new unit's set comes right away. "Say your fixes" items stay.
+ * ('skipped', like stale ones), so the new unit's set comes right away. "Say your fixes" items stay, and
+ * so does a voice note that came back to record again (heardNothing): she was just asked to redo it, so
+ * it stays until she does or it goes stale (resetEmptySubmission gives it today as its day).
  */
 export async function skipOtherUnitHomework(userId: string, unitId: string) {
   const rows = await query<{ id: string }>(
     `update homework set status = 'skipped'
       where user_id = $1 and status = 'assigned' and dedupe_key like 'unit:%' and unit_id is distinct from $2
+        and not coalesce(submission->'heardNothing' = 'true'::jsonb, false)
       returning id`,
     [userId, unitId],
   );
@@ -764,8 +776,9 @@ export async function assignHomeworkAfterSession(userId: string, sessionId: stri
  * Completes open shadow / words items once she has done enough drill attempts since they were
  * assigned: status 'reviewed', score = drill average, points. The points live on ONE 'homework'
  * coach_session row with the homework's own id (so Home / Progress / Cheer Squad count them, and a
- * second sync can't add another row). A shadow item only counts tries on ITS unit phrases
- * (payload.chunks); words items count any Say It Back try. Returns progress for the ones still open.
+ * second sync can't add another row). A shadow item marked payload.chunkFilter only counts tries on ITS
+ * unit phrases (payload.chunks); older shadow items and words items count any Shadow Me / Say It Back
+ * try, as before. Returns progress for the ones still open.
  */
 export async function syncAutoHomework(userId: string) {
   const items = await query<{ id: string; kind: "shadow" | "words"; goal: number; attempts: { target: string; score: number }[] }>(
@@ -775,6 +788,7 @@ export async function syncAutoHomework(userId: string) {
                        where d.user_id = h.user_id and d.created_at >= h.created_at
                          and d.kind = (case when h.kind = 'shadow' then 'shadow' else 'review' end)
                          and (h.kind <> 'shadow'
+                              or h.payload->'chunkFilter' is distinct from 'true'::jsonb
                               or coalesce(jsonb_array_length(h.chunks), 0) = 0
                               or lower(regexp_replace(btrim(d.target), '\\s+', ' ', 'g')) in (
                                    select lower(regexp_replace(btrim(c->>'en'), '\\s+', ' ', 'g'))
@@ -893,36 +907,91 @@ export async function saveSubmission(input: { id: string; userId: string; submis
   return "exists" as const;
 }
 
+/** A retake of a voice note handed in longer ago than this keeps its points (she has seen them count). */
+export const RETAKE_KEEPS_POINTS_AFTER_HOURS = 24;
+
 /**
- * A voice note with no words in it (Scribe heard nothing, a 1-second tap, or nothing can transcribe it):
- * the item goes back to 'assigned' so she can record it again, and its 'homework' coach_session row
- * (the points and speaking time of that empty note) is removed, in one statement. The empty clip is let
- * go (the orphan-clip sweep deletes it). Only a 'submitted' item is reset. Returns true if it was.
+ * A voice note with no words in it (Scribe heard nothing, a 1-second tap) or that can't be read at all
+ * (`unreadable`): the item goes back to 'assigned' so she can record it again, in one statement. Its day
+ * moves up to her today, so it can't drop off as stale before she sees it (and skipOtherUnitHomework
+ * leaves it alone). A note handed in within the last day gives its points back (its 'homework'
+ * coach_session row is removed); an older one keeps them, and a new recording rewrites that same row.
+ * The empty clip is let go (the orphan-clip sweep deletes it). Only a 'submitted' item is reset.
+ * Returns true if it was.
  */
-export async function resetEmptySubmission(id: string, userId: string) {
+export async function resetEmptySubmission(id: string, userId: string, options: { unreadable?: boolean; today?: string } = {}) {
+  const today = options.today ?? localToday(await learnerTimeZone(userId));
   const submission: Submission = { transcript: "", clipId: null, seconds: 0, heardNothing: true };
+  if (options.unreadable) submission.unreadable = true;
   const reset = await queryOne<{ id: string }>(
-    `with reset as (
-       update homework set status = 'assigned', submitted_at = null, points = 0, score = null, feedback = null,
-              review_started_at = null, submission = $3::jsonb
+    `with old as (
+       select id, coalesce(submitted_at > now() - make_interval(hours => $5::int), true) as fresh
+         from homework
         where id = $1 and user_id = $2 and status = 'submitted' and kind in ('speak', 'mission')
-        returning id
+     ), reset as (
+       update homework h
+          set status = 'assigned', submitted_at = null, score = null, feedback = null, review_started_at = null,
+              submission = $3::jsonb, due_on = greatest(h.due_on, $4::date),
+              points = case when old.fresh then 0 else h.points end
+         from old
+        where h.id = old.id and h.user_id = $2 and h.status = 'submitted'
+        returning h.id, old.fresh
      ), gone as (
-       delete from coach_session where id in (select id from reset) and user_id = $2 and activity = 'homework'
+       delete from coach_session where id in (select id from reset where fresh) and user_id = $2 and activity = 'homework'
      )
      select id from reset`,
-    [id, userId, JSON.stringify(submission)],
+    [id, userId, JSON.stringify(submission), today, RETAKE_KEEPS_POINTS_AFTER_HOURS],
   );
   return reset !== null;
+}
+
+/**
+ * She typed what she said, for a voice note nothing could transcribe (no server speech-to-text, or it
+ * couldn't open the recording): it fills the empty transcript of a 'submitted' item, so Hossam can review
+ * it right away (the claim is freed for that review). False if the item isn't waiting with no words.
+ */
+export async function addTypedTranscript(id: string, userId: string, transcript: string) {
+  const text = transcript.replace(/\s+/g, " ").trim().slice(0, 4000);
+  if (!text) return false;
+  const row = await queryOne<{ id: string }>(
+    `update homework
+        set submission = coalesce(submission, '{}'::jsonb) || jsonb_build_object('transcript', $3::text, 'typed', true),
+            review_started_at = null
+      where id = $1 and user_id = $2 and status = 'submitted' and kind in ('speak', 'mission')
+        and coalesce(btrim(submission->>'transcript'), '') = ''
+      returning id`,
+    [id, userId, text],
+  );
+  return row !== null;
 }
 
 /** Waiting reviews retry by themselves this long after she handed them in (the submit request tries first). */
 export const AUTO_REVIEW_AFTER_MS = 2 * 60_000;
 
-/** Voice notes whose review is worth retrying in the background now: handed in a while ago, oldest first. */
-export function reviewsToRetry(waiting: Pick<HomeworkItem, "id" | "kind" | "status" | "submitted_at">[], now = Date.now()) {
+/**
+ * Background retries (Home, opening the item) stop once a hand-in's review has started this many times
+ * (STT or Claude failing for good would otherwise be retried, and paid for, on every visit). Her "Ask
+ * Hossam to listen now" button still works.
+ */
+export const MAX_AUTO_REVIEWS = 3;
+
+/** How many times the review of this hand-in has started. */
+export function reviewAttempts(submission: Pick<Submission, "reviewAttempts"> | null | undefined) {
+  const n = submission?.reviewAttempts;
+  return typeof n === "number" && Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Voice notes whose review is worth retrying in the background now: handed in a while ago, not yet
+ * tried MAX_AUTO_REVIEWS times, oldest first.
+ */
+export function reviewsToRetry(
+  waiting: (Pick<HomeworkItem, "id" | "kind" | "status" | "submitted_at"> & { submission?: Submission | null })[],
+  now = Date.now(),
+) {
   return waiting
     .filter((item) => item.status === "submitted" && isVoiceKind(item.kind) && item.submitted_at)
+    .filter((item) => reviewAttempts(item.submission) < MAX_AUTO_REVIEWS)
     .filter((item) => now - +item.submitted_at! >= AUTO_REVIEW_AFTER_MS)
     .sort((a, b) => +a.submitted_at! - +b.submitted_at!)
     .map((item) => item.id);

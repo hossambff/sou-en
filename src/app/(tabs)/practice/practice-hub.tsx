@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ACTIVITY_INFO, drillHref, sessionHref, type Activity } from "@/lib/scenarios";
+import { shadowHomeworkHref } from "@/lib/plan";
 import type { SessionMode } from "@/lib/coach-prompt";
 import { hourIn, isNightHour } from "@/lib/time-of-day";
 
@@ -37,6 +38,8 @@ export function PracticeHub(props: {
   /** Her level and current unit (from the placement test / exams) */
   course: { level: string; unitTitle: string; unitEmoji: string; placementDone: boolean };
   openHomework: number;
+  /** Her open shadow homework: Shadow Me then drills that homework's unit phrases (and counts toward it). */
+  shadowHomeworkId?: string | null;
 }) {
   const [minutes, setMinutes] = useState(MINUTES.includes(props.defaultMinutes) ? props.defaultMinutes : 5);
   const [mode, setMode] = useState<SessionMode>("normal");
@@ -245,7 +248,7 @@ export function PracticeHub(props: {
           <SectionTitle en="Quick drills & more" ar="تمارين صغار" />
           <div className="grid grid-cols-2 gap-3">
             <Tile
-              href={drillHref("shadow", { mode })}
+              href={props.shadowHomeworkId ? shadowHomeworkHref(props.shadowHomeworkId, mode) : drillHref("shadow", { mode })}
               emoji="🦜"
               title="Shadow Me"
               ar="عاودي ورا حسام"

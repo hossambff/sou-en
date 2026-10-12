@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({ userId: "u1" as string | null }));
-const data = vi.hoisted(() => ({ homeworkShadowRound: vi.fn(), shadowRound: vi.fn() }));
+const data = vi.hoisted(() => ({ homeworkShadowRound: vi.fn(), shadowRound: vi.fn(), unitShadowRound: vi.fn() }));
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/db", () => ({ query: vi.fn(), queryOne: vi.fn() }));
@@ -18,6 +18,7 @@ beforeEach(() => {
   auth.userId = "u1";
   data.homeworkShadowRound.mockReset().mockResolvedValue(unitRound);
   data.shadowRound.mockReset().mockResolvedValue(normalRound);
+  data.unitShadowRound.mockReset().mockResolvedValue(unitRound);
 });
 
 const get = (url: string, referer?: string) => GET(new Request(url, { headers: referer ? { referer } : {} }));
@@ -41,5 +42,12 @@ describe("GET /api/drill/shadow (Practice more)", () => {
   it("needs her session", async () => {
     auth.userId = null;
     expect((await get("http://localhost/api/drill/shadow")).status).toBe(401);
+  });
+
+  it("keeps a unit round (opened after an exam) on that unit's phrases", async () => {
+    const response = await get("http://localhost/api/drill/shadow", "http://localhost/drill/shadow?unit=a1-02&exam=" + ID);
+    expect(await response.json()).toEqual({ items: unitRound });
+    expect(data.unitShadowRound).toHaveBeenCalledWith("u1", "a1-02", ID);
+    expect(data.shadowRound).not.toHaveBeenCalled();
   });
 });

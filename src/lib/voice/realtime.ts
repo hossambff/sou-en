@@ -11,6 +11,13 @@
  * still coming. Her TURN ends after a longer pause (2.2 s, 2.8 s whispering: see turnPauseMs), her "done"
  * tap, or the 45 s cap; whatever the server hasn't committed yet is then committed by hand.
  *
+ * On a slow phone network the server's messages come seconds late, and her audio can queue on the phone
+ * (socket.bufferedAmount): a VAD commit for an earlier segment can arrive after her pause or her tap. So the
+ * turn ends on what her AUDIO holds, not on when messages arrive: every voice run the local gate heard end in a
+ * pause the server's VAD commits on is owed one commit, plus the answer to our own commit when she was still
+ * speaking; her audio must have left the phone; and a commit that arrives while it hasn't can't be our answer.
+ * Unsure when the wait runs out: her whole captured turn is transcribed in one go.
+ *
  * Same contract as Listener.hear() (heard / silence / unclear / failed), plus onPartial.
  * When live listening can't work, nothing is lost:
  *   - before she speaks (no token, socket refused, no AudioWorklet): the turn goes to the batch Listener;
@@ -34,7 +41,7 @@ const MAX_UTTERANCE_MS = 45_000;
 const TOKEN_MAX_AGE_MS = 12 * 60_000;
 const TOKEN_TIMEOUT_MS = 6_000;
 const CONNECT_TIMEOUT_MS = 6_000;
-/** After a manual commit, wait this long (once the socket has sent everything) for the final text. */
+/** After a manual commit, wait this long (once the socket has sent everything, and the server went quiet) for the final text. */
 const COMMIT_WAIT_MS = 3_000;
 /** …but never longer than this (a slow uplink): then her captured audio is transcribed in one go. */
 const COMMIT_MAX_WAIT_MS = 10_000;
@@ -44,6 +51,15 @@ const CAPTURE_START_TIMEOUT_MS = 3_000;
 const WORDS_LAG_MS = 700;
 /** The server committed all her words but the local gate still hears "voice" (a noisy room): end this much later. */
 const NOISY_ROOM_EXTRA_MS = 2_000;
+/**
+ * A pause in her audio already counts as one the server's VAD commits on when it's this much shorter than the
+ * server's threshold: the gate's "voice" runs a little longer than the server's (a breath, the room), and a
+ * segment the server commits that we didn't count could end her turn early; one we counted that it didn't only
+ * costs a wait (an extra round trip, or her captured turn uploaded).
+ */
+const VAD_PAUSE_MARGIN_SECONDS = 0.3;
+/** 50 ms voice readings a run needs to be speech the server commits (the gate's own rule for "she started"): not a click */
+const MIN_RUN_READINGS = 3;
 /** The rescue WAV keeps at most the last this-many seconds of her turn (the longest turn, plus padding). */
 const RESCUE_MAX_SECONDS = MAX_UTTERANCE_MS / 1000 + 5;
 const STT_TIMEOUT_MS = 20_000;
@@ -384,9 +400,24 @@ export class RealtimeListener {
       const segments: string[] = [];
       let partial = "";
       let shown = "";
-      /** When the server's words last changed, and when it last committed (performance.now()) */
+      /** When the server's words last changed, when it last committed, and when it last said either (performance.now()) */
       let lastWordsAt = -Infinity;
       let lastCommitAt = -Infinity;
+      let lastNewsAt = -Infinity;
+      /**
+       * Her voice runs, in her audio (sample positions): the gate's voice readings, or before the gate heard her,
+       * the server's words. A run closed by a pause the server's VAD commits on is owed one committed message.
+       */
+      const vadPauseSamples = Math.round((vadSilenceSeconds(whisper) - VAD_PAUSE_MARGIN_SECONDS) * TARGET_RATE);
+      let runOpen = false;
+      let runReadings = 0;
+      let runLastSample = 0;
+      let closedRuns = 0;
+      /** Committed messages since she started speaking (one before can't be for a run of hers) */
+      let commits = 0;
+      /** After our commit: did she still speak (its answer is owed too), and how many commits are still owed */
+      let needOurs = false;
+      let owed = 0;
       /** 16 kHz samples captured so far, and where her turn ended (for the rescue WAV) */
       let capturedSamples = 0;
       let endSample = Infinity;
@@ -451,6 +482,26 @@ export class RealtimeListener {
         if (mode === "done") return;
         cleanup();
         resolve(this.batch.hear(options));
+      };
+
+      /** Bytes of her audio still queued on the phone (a slow uplink): the server hasn't heard them yet. */
+      const queued = () => socket?.bufferedAmount ?? 0;
+
+      /** Her voice at this point of her audio (`readings` 50 ms readings' worth). */
+      const runVoice = (sample: number, readings: number) => {
+        if (!runOpen) {
+          runOpen = true;
+          runReadings = 0;
+        }
+        runReadings += readings;
+        runLastSample = sample;
+      };
+
+      /** Quiet at this point of her audio: a pause the server's VAD commits on closes her run. */
+      const runQuiet = (sample: number) => {
+        if (!runOpen || sample - runLastSample < vadPauseSamples) return;
+        runOpen = false;
+        if (runReadings >= MIN_RUN_READINGS) closedRuns++;
       };
 
       const signalSpeech = (by: "gate" | "words") => {
@@ -529,6 +580,10 @@ export class RealtimeListener {
         if (mode !== "committing") return;
         endSample = capturedSamples;
         if (!open || !socket) return void upload(); // not connected yet: transcribe what we have
+        // What must come back: a commit for every run of hers the server's VAD closes (some may still be on
+        // their way), and the answer to this one if she was still speaking (or words are still open)
+        needOurs = runOpen;
+        owed = Math.max(needOurs || partial ? 1 : 0, closedRuns + (needOurs ? 1 : 0) - commits);
         try {
           // A tiny bit of silence carries the commit (an empty chunk isn't needed)
           socket.send(
@@ -544,22 +599,39 @@ export class RealtimeListener {
           return void upload();
         }
         // Wait for the final text, counting only once the socket has sent everything (a slow uplink queues
-        // her audio); no text in time → her captured turn is transcribed in one go
+        // her audio) and starting over while the server still sends her words (it's behind, not gone);
+        // no text in time → her captured turn is transcribed in one go
         const sentAt = performance.now();
         let drainedAt: number | null = null;
         const waitForText = () => {
           if (mode !== "committing") return;
           const now = performance.now();
-          if ((socket?.bufferedAmount ?? 0) > 0) drainedAt = null;
+          if (queued() > 0) drainedAt = null;
           else drainedAt ??= now;
-          if ((drainedAt !== null && now - drainedAt >= COMMIT_WAIT_MS) || now - sentAt >= COMMIT_MAX_WAIT_MS) return void upload();
+          const quietFor = drainedAt === null ? 0 : now - Math.max(drainedAt, lastNewsAt);
+          // Every commit owed came while her audio was still queued: once it has all gone and no new words came, done
+          if (owed <= 0 && !needOurs && !partial && quietFor >= WORDS_LAG_MS) return finishWithWords();
+          if (quietFor >= COMMIT_WAIT_MS || now - sentAt >= COMMIT_MAX_WAIT_MS) return void upload();
           commitTimer = window.setTimeout(waitForText, 250);
         };
         waitForText();
       };
 
-      /** Has the server committed everything she said? (Then her turn can end without a round trip.) */
-      const allCommitted = () => !partial && lastCommitAt > -Infinity && !(gate.speaking && gate.lastVoiceAt > lastCommitAt);
+      /** A committed message after our commit: her turn is complete once every commit owed is in. */
+      const committedAfterOurs = () => {
+        // While her audio is still queued on the phone, the server hasn't even heard our commit: this is one
+        // of its own VAD commits (one more than we counted), and our answer is still owed
+        const early = queued() > 0;
+        owed = early && needOurs ? Math.max(1, owed - 1) : owed - 1;
+        if (owed <= 0 && !early) finishWithWords();
+      };
+
+      /**
+       * Has the server committed everything she said? (Then her turn can end without a round trip.) Counted in
+       * her audio, not by when messages arrived: no words open, her last run closed by a pause, a commit for every
+       * run, and her audio has left the phone (a commit that's still to come may be for words it holds).
+       */
+      const allCommitted = () => !partial && !runOpen && commits >= closedRuns && queued() === 0;
 
       /** Her turn is over (her pause, her tap, the cap): end it now, or commit what's still open first. */
       const endTurn = () => {
@@ -614,7 +686,14 @@ export class RealtimeListener {
           if (mode === "done") return;
           onLevel?.(Math.min(1, rms * (whisper ? 30 : 15)));
           const now = performance.now();
-          if (gate.feed(rms, now, samples)) signalSpeech("gate");
+          const started = gate.feed(rms, now, samples);
+          if (started) signalSpeech("gate");
+          if (mode === "live") {
+            // Her runs as the gate hears them (3 loud readings started her speech; it carries on a run of her words)
+            if (started) runVoice(samples, MIN_RUN_READINGS);
+            else if (gate.speaking && gate.lastVoiceSample === samples) runVoice(samples, 1);
+            else runQuiet(samples);
+          }
           check(now);
         },
       };
@@ -657,7 +736,9 @@ export class RealtimeListener {
             if (!text) return; // "nothing yet" / a keepalive after a commit
             if (text !== partial) {
               partial = text; // keepalives repeat the open segment's words: only a change is news
-              lastWordsAt = performance.now();
+              lastWordsAt = lastNewsAt = performance.now();
+              // Before the gate hears her, the server's words are the only sign of her voice (they come late)
+              if (mode === "live" && !gate.speaking) runVoice(capturedSamples, MIN_RUN_READINGS);
             }
             signalSpeech("words");
             showWords();
@@ -665,15 +746,17 @@ export class RealtimeListener {
             // One segment of her turn (the server's VAD heard a pause, or our commit): keep it and keep listening
             const text = message.text.trim();
             partial = "";
-            lastCommitAt = performance.now();
+            lastCommitAt = lastNewsAt = performance.now();
+            if (spoke) commits++;
             if (text) {
               this.failures = 0;
               segments.push(text);
               signalSpeech("words");
               showWords();
             }
-            // An empty VAD commit was only noise; after our own commit, her turn is complete
-            if (mode === "committing") finishWithWords();
+            // An empty VAD commit was only noise. After our own commit, her turn is complete once every commit
+            // owed is in: a late VAD commit for an earlier segment is only one of them
+            if (mode === "committing" && commitSent) committedAfterOurs();
           } else if (message.type === "error") {
             fail(message.kind);
           }

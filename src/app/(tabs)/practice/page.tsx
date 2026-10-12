@@ -17,11 +17,13 @@ export default async function PracticePage() {
   if (!profile) redirect("/onboarding");
 
   const month = monthOfJourney(profile.started_on);
-  const counts = await queryOne<{ mistakes: number; due: number; homework: number }>(
+  const counts = await queryOne<{ mistakes: number; due: number; homework: number; shadow_homework: string | null }>(
     `select (select count(*)::int from error_log
               where user_id = $1 and created_at > now() - make_interval(days => $2)) as mistakes,
             (select count(*)::int from vocab_item where user_id = $1 and due <= now()) as due,
-            (select count(*)::int from homework where user_id = $1 and status = 'assigned') as homework`,
+            (select count(*)::int from homework where user_id = $1 and status = 'assigned') as homework,
+            (select id::text from homework where user_id = $1 and status = 'assigned' and kind = 'shadow'
+              order by due_on, created_at limit 1) as shadow_homework`,
     [user.id, RECENT_MISTAKE_DAYS],
   );
   const unit = currentUnitFor(profile.current_unit, profile.cefr_level);
@@ -48,6 +50,7 @@ export default async function PracticePage() {
         placementDone: profile.placement_status === "done",
       }}
       openHomework={counts?.homework ?? 0}
+      shadowHomeworkId={counts?.shadow_homework ?? null}
     />
   );
 }

@@ -129,6 +129,92 @@ class FakeCapture implements Capture {
   }
 }
 
+/**
+ * A phone uplink and a realtime server like ElevenLabs': the socket sends `uplink` bytes per ms (bufferedAmount
+ * holds the rest); the server hears only what arrived, in order, shows the open segment's words as partials,
+ * commits a segment after 1.5 s of silence in that audio (VAD) or on a manual commit (an empty text when there's
+ * nothing new), and its messages reach the phone `delayMs` later. Each stretch of her voice (after ≥ 0.5 s of
+ * quiet) says the next phrase of `script`; a segment holds every phrase said since the last commit.
+ */
+class LaggySocket extends FakeSocket {
+  serverCommits = 0;
+  private queue: string[] = [];
+  private drain: ReturnType<typeof setInterval> | null = null;
+  private budget = 0;
+  private clock = 0;
+  private next = 0;
+  /** The open segment's phrases, and how much of the last one has been heard */
+  private phrases: string[] = [];
+  private phraseVoiced = 0;
+  private lastVoice = -Infinity;
+  private shown = "";
+  constructor(
+    url: string,
+    private script: string[],
+    private delayMs: number,
+    private uplink: number,
+  ) {
+    super(url);
+  }
+  send(data: string) {
+    super.send(data);
+    if (this.uplink === Infinity) return this.hear(data);
+    this.queue.push(data);
+    this.bufferedAmount += data.length;
+    this.drain ??= setInterval(() => this.transmit(10), 10);
+  }
+  close() {
+    super.close();
+    if (this.drain) clearInterval(this.drain);
+  }
+  private transmit(ms: number) {
+    this.budget += this.uplink * ms;
+    while (this.queue.length && this.budget >= this.queue[0].length) {
+      const data = this.queue.shift()!;
+      this.budget -= data.length;
+      this.bufferedAmount -= data.length;
+      this.hear(data);
+    }
+    if (!this.queue.length) this.budget = 0;
+  }
+  private emit(message: Record<string, unknown>) {
+    setTimeout(() => this.server(message), this.delayMs);
+  }
+  private commit() {
+    const text = this.phrases.join(" ");
+    this.phrases = [];
+    this.shown = "";
+    this.serverCommits++;
+    this.emit({ message_type: "committed_transcript", text });
+  }
+  private hear(data: string) {
+    const message = JSON.parse(data) as { audio_base_64: string; commit: boolean };
+    const bytes = Uint8Array.from(atob(message.audio_base_64), (c) => c.charCodeAt(0));
+    const pcm = new Int16Array(bytes.buffer, 0, bytes.length / 2);
+    const quietBefore = this.clock - this.lastVoice;
+    this.clock += pcm.length;
+    if (pcm.some((v) => Math.abs(v) >= 50)) {
+      if (!this.phrases.length || quietBefore >= 0.5 * 16_000) {
+        this.phrases.push(this.script[this.next++] ?? "");
+        this.phraseVoiced = 0;
+      }
+      this.phraseVoiced += pcm.length;
+      this.lastVoice = this.clock;
+      // About a word every 0.25 s of her voice
+      const words = this.phrases.at(-1)!.split(" ");
+      const said = words.slice(0, Math.max(1, Math.ceil(this.phraseVoiced / 4000))).join(" ");
+      const text = [...this.phrases.slice(0, -1), said].join(" ");
+      if (text !== this.shown) {
+        this.shown = text;
+        this.emit({ message_type: "partial_transcript", text });
+      }
+    } else if (this.phrases.length && this.clock - this.lastVoice >= 1.5 * 16_000) {
+      this.commit();
+    }
+    if (message.commit) this.commit();
+  }
+}
+
 function fakeBatch(result: ListenResult = { kind: "heard", text: "from batch", seconds: 1 }) {
   const batch = {
     usingServerStt: true,
@@ -632,6 +718,168 @@ describe("RealtimeListener", () => {
     expect(deps.fetchToken).toHaveBeenCalledTimes(2);
     listener.cancel();
     await next;
+  });
+
+  describe("a slow server or a queued uplink: a late VAD commit for an earlier segment doesn't end her turn", () => {
+    const scenarios = [
+      { delayMs: 3200, uplink: Infinity },
+      { delayMs: 3600, uplink: Infinity },
+      { delayMs: 4500, uplink: Infinity },
+      { delayMs: 3200, uplink: 30 },
+      { delayMs: 4500, uplink: 30 },
+      { delayMs: 0, uplink: 30 },
+    ];
+
+    function simulated(script: string[], delayMs: number, uplink: number, transcribed = script.join(" ")) {
+      const laggy: LaggySocket[] = [];
+      const env = setup({
+        openSocket: vi.fn((url: string) => {
+          const socket = new LaggySocket(url, script, delayMs, uplink);
+          laggy.push(socket);
+          return socket;
+        }),
+        transcribe: vi.fn(async () => ({ ok: true as const, text: transcribed })),
+      });
+      return { ...env, laggy };
+    }
+
+    it.each(scenarios)(
+      "A (1 s), a 2 s pause, B (1 s), then her pause: the whole sentence (server delay $delayMs ms, uplink $uplink bytes/ms)",
+      async ({ delayMs, uplink }) => {
+        const { listener, captures, ticks, laggy, deps } = simulated(["Yesterday I", "went to the souk"], delayMs, uplink);
+        const heard = listener.hear({ whisper: false });
+        await vi.advanceTimersByTimeAsync(0);
+        const [capture] = captures;
+        const [socket] = laggy;
+        socket.open();
+        await ticks(capture, 0.2, 20); // "Yesterday I"
+        await ticks(capture, 0, 40); // 2 s to find the words
+        await ticks(capture, 0.2, 20); // "went to the souk"
+        if (uplink !== Infinity) expect(socket.bufferedAmount).toBeGreaterThan(30_000); // her audio is queued on the phone
+        await ticks(capture, 0, 400); // her pause ends the turn (the mic runs on while the server catches up)
+        const result = await heard;
+        expect(result).toMatchObject({ kind: "heard", text: "Yesterday I went to the souk" });
+        expect(socket.serverCommits).toBeGreaterThanOrEqual(2);
+        // With a merely slow server (no queue), the live words carry the turn: no upload
+        if (uplink === Infinity) expect(deps.transcribe).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([{ delayMs: 600 }, { delayMs: 1000 }, { delayMs: 3200 }, { delayMs: 4500 }])(
+      "'My name is' … a 1.6 s pause … 'Sou' and her tap right away: the whole sentence (server delay $delayMs ms)",
+      async ({ delayMs }) => {
+        const { listener, captures, ticks, laggy, deps } = simulated(["My name is", "Sou."], delayMs, Infinity);
+        const heard = listener.hear({ whisper: false });
+        await vi.advanceTimersByTimeAsync(0);
+        const [capture] = captures;
+        const [socket] = laggy;
+        socket.open();
+        await ticks(capture, 0.2, 20); // "My name is"
+        await ticks(capture, 0, 32); // 1.6 s to find the word: the server's VAD commits a segment…
+        await ticks(capture, 0.2, 8); // "Sou"
+        listener.finish(); // …her tap, before that commit arrived
+        await ticks(capture, 0, 300);
+        expect(await heard).toMatchObject({ kind: "heard", text: "My name is Sou." });
+        expect(socket.commits).toHaveLength(1);
+        expect(deps.transcribe).not.toHaveBeenCalled();
+      },
+    );
+
+    it("the same tap, with the server's messages sent by hand: the VAD commit for 'My name is' arrives after her tap", async () => {
+      const { listener, sockets, captures, ticks } = setup();
+      const heard = listener.hear({ whisper: false });
+      await vi.advanceTimersByTimeAsync(0);
+      const [capture] = captures;
+      const [socket] = sockets;
+      socket.open();
+      await ticks(capture, 0.2, 20);
+      socket.server({ message_type: "partial_transcript", text: "My name is" });
+      await ticks(capture, 0, 32);
+      await ticks(capture, 0.2, 8);
+      listener.finish();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(socket.commits).toHaveLength(1);
+      socket.server({ message_type: "committed_transcript", text: "My name is" }); // the server's VAD, late
+      expect(await settled(heard)).toBe(false);
+      socket.server({ message_type: "committed_transcript", text: "Sou." }); // the answer to her commit
+      expect(await heard).toMatchObject({ kind: "heard", text: "My name is Sou." });
+    });
+
+    it("…and when only the server's words heard 'My name is' (the gate didn't), it still waits for both commits", async () => {
+      const { listener, sockets, captures, ticks } = setup();
+      const heard = listener.hear({ whisper: false });
+      await vi.advanceTimersByTimeAsync(0);
+      const [capture] = captures;
+      const [socket] = sockets;
+      socket.open();
+      socket.server({ message_type: "partial_transcript", text: "My name is" });
+      await ticks(capture, 0, 32);
+      await ticks(capture, 0.2, 8);
+      listener.finish();
+      await vi.advanceTimersByTimeAsync(0);
+      socket.server({ message_type: "committed_transcript", text: "My name is" });
+      expect(await settled(heard)).toBe(false);
+      socket.server({ message_type: "committed_transcript", text: "Sou." });
+      expect(await heard).toMatchObject({ kind: "heard", text: "My name is Sou." });
+    });
+
+    it("a commit that arrives while her audio is still queued on the phone can't answer her tap", async () => {
+      const { listener, sockets, captures, ticks } = setup();
+      const heard = listener.hear({ whisper: false });
+      await vi.advanceTimersByTimeAsync(0);
+      const [capture] = captures;
+      const [socket] = sockets;
+      socket.open();
+      await ticks(capture, 0.2, 10);
+      socket.bufferedAmount = 50_000;
+      listener.finish();
+      await vi.advanceTimersByTimeAsync(0);
+      socket.server({ message_type: "committed_transcript", text: "I want to" }); // the server's VAD, from the queue's head
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await settled(heard)).toBe(false);
+      socket.bufferedAmount = 0;
+      await vi.advanceTimersByTimeAsync(500);
+      socket.server({ message_type: "committed_transcript", text: "buy vegetables." });
+      expect(await heard).toMatchObject({ kind: "heard", text: "I want to buy vegetables." });
+    });
+
+    it("her pause while her audio is still queued: committed by hand, done once it has all gone", async () => {
+      const { listener, sockets, captures, ticks, deps } = setup();
+      const heard = listener.hear({ whisper: false });
+      await vi.advanceTimersByTimeAsync(0);
+      const [capture] = captures;
+      const [socket] = sockets;
+      socket.open();
+      await ticks(capture, 0.2, 10);
+      socket.server({ message_type: "committed_transcript", text: "I slept well." });
+      socket.bufferedAmount = 50_000;
+      await ticks(capture, 0, 46);
+      expect(socket.commits).toHaveLength(1); // not "all committed" while her audio is still on the phone
+      expect(await settled(heard)).toBe(false);
+      socket.bufferedAmount = 0;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await heard).toMatchObject({ kind: "heard", text: "I slept well." });
+      expect(deps.transcribe).not.toHaveBeenCalled();
+    });
+
+    it("unsure when the wait runs out (a commit short): her whole captured turn is transcribed", async () => {
+      const { listener, sockets, captures, ticks, deps } = setup();
+      const heard = listener.hear({ whisper: false });
+      await vi.advanceTimersByTimeAsync(0);
+      const [capture] = captures;
+      const [socket] = sockets;
+      socket.open();
+      await ticks(capture, 0.2, 20);
+      await ticks(capture, 0, 32); // the gate hears a pause the server's VAD commits on…
+      await ticks(capture, 0.2, 8);
+      listener.finish();
+      await vi.advanceTimersByTimeAsync(0);
+      socket.server({ message_type: "committed_transcript", text: "My name is" }); // …but only one commit ever comes
+      await vi.advanceTimersByTimeAsync(2900);
+      expect(deps.transcribe).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(300);
+      expect(await heard).toMatchObject({ kind: "heard", text: "rescued words" });
+    });
   });
 
   it("the batch Listener's phone fallback also turns live listening off", async () => {

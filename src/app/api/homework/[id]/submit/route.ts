@@ -85,7 +85,9 @@ async function readBody(request: Request, userId: string) {
  * Idempotent per homework id: a retry after a timeout never saves twice or doubles the points; it
  * only (re)tries the review. The recording is saved first (points + speaking time count right away);
  * Hossam's review needs Claude and may stay pending — POST /api/homework/<id> retries it. A note with
- * no words in it comes back as "retake": the item is open again so she can record it once more.
+ * no words in it (or a recording that can't be opened) comes back as "retake": the item is open again
+ * so she can record it once more. Without server speech-to-text, a note with no transcript stays
+ * pending ("no-transcript") until she types what she said (POST /api/homework/<id> { transcript }).
  * → 200 { id, status: "reviewed" | "pending" | "retake", reason? } · 400 bad body · 404 · 409 drill homework
  */
 export async function POST(request: Request, context: RouteContext<"/api/homework/[id]/submit">) {

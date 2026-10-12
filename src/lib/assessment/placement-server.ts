@@ -81,29 +81,50 @@ export type PlacementOverview = {
     finishedAt: string | null;
     /** She skipped the speaking part of it (a capped first guess) */
     speakingSkipped: boolean;
+    /** Some of her speaking answers couldn't be heard (no speech-to-text), so they were left out */
+    speakingUnheard: boolean;
+    /** It set her level (her first placement, or one that replaced a first guess), not a forward-only check-in */
+    setLevel: boolean;
   } | null;
   /** When she may retake it (null = now). Only a done placement has a weekly limit. */
   retakeAt: Date | null;
 };
 
-type LatestPlacement = { id: string; status: PlacementRow["status"]; cefr: string | null; finished_at: Date | null; speaking_skipped: boolean | null };
+/**
+ * SQL: this placement SET her level: it was applied as a first placement (or a replace of a first
+ * guess), not as a forward-only check-in. Older rows don't store forwardOnly: a retake was forward-only.
+ */
+const SET_HER_LEVEL = `coalesce(jsonb_typeof(result->'applied') = 'object' and not coalesce((result->>'forwardOnly')::boolean, retake), false)`;
 
-/** Her latest finished placement (with whether she skipped its speaking part). */
+type LatestPlacement = {
+  id: string;
+  status: PlacementRow["status"];
+  cefr: string | null;
+  finished_at: Date | null;
+  speaking_skipped: boolean | null;
+  speaking_unheard: boolean | null;
+  set_level: boolean | null;
+};
+
+/** Her latest finished placement (with whether she skipped its speaking part and whether it set her level). */
 function latestPlacement(userId: string, db: Db) {
   return one<LatestPlacement>(
     db,
-    `select id, status, cefr, finished_at, coalesce((result->>'speakingSkipped')::boolean, false) as speaking_skipped
+    `select id, status, cefr, finished_at, coalesce((result->>'speakingSkipped')::boolean, false) as speaking_skipped,
+            coalesce((result->>'speakingUnheard')::boolean, false) as speaking_unheard, ${SET_HER_LEVEL} as set_level
        from placement_test where user_id = $1 and finished_at is not null order by finished_at desc limit 1`,
     [userId],
   );
 }
 
 /**
- * When a retake opens (null = now). A week after the last one, but right away when she skipped the
- * speaking part last time (that level is only a capped first guess) or never placed.
+ * When a retake opens (null = now). A week after the last one; right away when she never placed, or
+ * when the last one set her level without the speaking part (that level is only a capped first guess,
+ * and a retake may correct it). A forward-only check-in without speaking never set anything, so it
+ * keeps the weekly rhythm.
  */
 function retakeOpensAt(placedBefore: boolean, latest: LatestPlacement | null) {
-  if (!placedBefore || latest?.speaking_skipped) return null;
+  if (!placedBefore || (latest?.speaking_skipped && latest.set_level)) return null;
   return placementRetakeAt(latest?.finished_at);
 }
 
@@ -123,6 +144,8 @@ export async function placementOverview(userId: string, db: Db = defaultDb): Pro
           cefr: latest.cefr,
           finishedAt: latest.finished_at ? new Date(latest.finished_at).toISOString() : null,
           speakingSkipped: Boolean(latest.speaking_skipped),
+          speakingUnheard: Boolean(latest.speaking_unheard),
+          setLevel: Boolean(latest.set_level),
         }
       : null,
     retakeAt: retakeOpensAt(status === "done", latest),
@@ -145,7 +168,8 @@ export type SavePlacementOutcome =
 
 /**
  * Saves a finished placement test at most once per client id (a retry after a timeout finds it).
- * A retake within a week of the last one is refused (unless she skipped the speaking last time).
+ * A retake within a week of the last one is refused (unless the last one set her level without the
+ * speaking part, see retakeOpensAt).
  * It counts as a retake (forward-only) when she had placed before or already made progress in the
  * course: passed a unit exam, or an exam set her unit.
  */
@@ -261,7 +285,8 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
   const row = await loadPlacement(id, userId, db);
   if (!row) throw new Error("Placement test not found");
 
-  const filled = await fillTranscripts(row.answers, (a) => (isSpeaking(a) ? a : null), userId, db);
+  // A clip that can never be heard (or still can't a day later) is left out instead of waiting forever
+  const filled = await fillTranscripts(row.answers, (a) => (isSpeaking(a) ? a : null), userId, db, row.finished_at);
   const answers = filled.answers;
   const steps = stepsFromAnswers(PLACEMENT_BANK, answers);
   const spoken = answers.filter(isSpeaking);
@@ -371,6 +396,11 @@ async function scoreClaimed(id: string, userId: string, db: Db, askHossam: Verdi
 /**
  * Should this placement only move her forward? (See placementIsForwardOnly.) Progress = a passed unit,
  * or a unit set by an exam before she ever placed.
+ *
+ * Whether her level is still only a first guess is judged on the placement that last SET it (applied as
+ * a first placement or a replace, see SET_HER_LEVEL), never on a forward-only check-in since: a later
+ * check-in that skipped the speaking (or that Hossam couldn't grade) didn't set anything, so it must not
+ * make an earlier full, verified result replaceable.
  */
 async function decideForwardOnly(
   tx: Db,
@@ -384,17 +414,17 @@ async function decideForwardOnly(
 ) {
   const progressed = input.passedAt.length > 0 || (input.profile?.placement_status !== "done" && Boolean(input.profile?.current_unit));
   if (!input.row.retake && !progressed) return false;
-  // Her last placement that was applied to her profile, before this one
-  const previous = await one<{ status: string; finished_at: Date; provisional: boolean | null; speaking_skipped: boolean | null }>(
+  // The placement before this one that last set her level
+  const anchor = await one<{ status: string; finished_at: Date; provisional: boolean | null; speaking_skipped: boolean | null }>(
     tx,
     `select status, finished_at, (result->>'provisional')::boolean as provisional, (result->>'speakingSkipped')::boolean as speaking_skipped
        from placement_test
-      where user_id = $1 and id <> $2 and finished_at is not null and finished_at < $3 and jsonb_typeof(result->'applied') = 'object'
+      where user_id = $1 and id <> $2 and finished_at is not null and finished_at < $3 and ${SET_HER_LEVEL}
       order by finished_at desc limit 1`,
     [input.userId, input.id, input.row.finished_at ?? new Date()],
   );
-  const previousProvisional = Boolean(previous && (previous.status === "pending" || previous.provisional || previous.speaking_skipped));
-  const passedSincePrevious = Boolean(previous && input.passedAt.some((at) => at && new Date(at) > new Date(previous.finished_at)));
+  const previousProvisional = Boolean(anchor && (anchor.status === "pending" || anchor.provisional || anchor.speaking_skipped));
+  const passedSincePrevious = Boolean(anchor && input.passedAt.some((at) => at && new Date(at) > new Date(anchor.finished_at)));
   return placementIsForwardOnly({ retake: input.row.retake, progressed, previousProvisional, passedSincePrevious });
 }
 

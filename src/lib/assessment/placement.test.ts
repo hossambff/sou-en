@@ -472,6 +472,23 @@ describe("stepsFromAnswers", () => {
     expect(steps.repeat).toEqual([{ itemId: "r1", level: "A1", credit: 0.72 }]);
     expect(steps.speaking).toEqual([{ itemId: "s1", level: "A1", credit: 0.4 }]);
     expect(steps.samples).toEqual([{ words: 4, seconds: 20 }]);
+    expect(steps.unheard).toBe(0);
+  });
+
+  it("leaves out a spoken answer nobody could hear (no speech-to-text), instead of scoring it as silence", () => {
+    const unheard: PlacementAnswer = { section: "speaking", itemId: "s1", transcript: "", clipId: "c1", seconds: 30, sttTried: true, unheard: true };
+    const steps = stepsFromAnswers(testBank, [{ section: "listening", itemId: "l1", choice: 1, replays: 0 }, unheard]);
+    expect(steps.speaking).toEqual([]);
+    expect(steps.samples).toEqual([]);
+    expect(steps.unheard).toBe(1);
+    const result = buildPlacementResult(steps);
+    expect(result.speakingUnheard).toBe(true);
+    expect(result.speakingSkipped).toBe(true); // nothing heard: a capped first guess, retake it with speaking
+    expect(result.provisional).toBe(false);
+    // Heard nothing (speech-to-text listened, she was silent): still counts as a silent answer
+    const silent = stepsFromAnswers(testBank, [{ ...unheard, unheard: undefined }]);
+    expect(silent.speaking).toEqual([{ itemId: "s1", level: "A1", credit: 0 }]);
+    expect(buildPlacementResult(silent).speakingSkipped).toBe(false);
   });
 });
 

@@ -6,8 +6,9 @@ import { getUnit, unitPosition } from "@/lib/curriculum";
 import { learnerUsesServerVoice } from "@/lib/tts";
 import { hourIn, isNightHour } from "@/lib/time-of-day";
 import { learnerSpeechRate } from "@/app/drill/voice-prefs";
-import { buildUnitExam, newExamSeed } from "@/lib/assessment/exam";
-import { examAccess, unitRetryAt } from "@/lib/assessment/exam-server";
+import { unitShadowHref } from "@/app/drill/drill-data";
+import { buildUnitExam, examRetryAt, newExamSeed } from "@/lib/assessment/exam";
+import { examAccess, lastFailedExam } from "@/lib/assessment/exam-server";
 import { Shell, whenLabel } from "../../_ui/badges";
 import { ExamClient } from "./exam-client";
 
@@ -25,8 +26,10 @@ export default async function UnitExamPage({ params }: PageProps<"/exams/unit/[u
   if (!access.allowed) redirect("/exams");
   const timeZone = profileTimeZone(profile);
   const position = unitPosition(unit.id);
+  const night = isNightHour(hourIn(new Date(), timeZone));
 
-  const retryAt = await unitRetryAt(user.id, unit.id);
+  const lastFail = await lastFailedExam(user.id, unit.id);
+  const retryAt = examRetryAt(lastFail?.finished_at);
   if (retryAt) {
     return (
       <Shell>
@@ -44,8 +47,9 @@ export default async function UnitExamPage({ params }: PageProps<"/exams/unit/[u
           </p>
         </div>
         <div className="grid gap-2">
+          {/* This unit's phrases, the ones the failed attempt listed first */}
           <Link
-            href="/drill/shadow"
+            href={unitShadowHref(unit.id, lastFail?.id, night)}
             className="block rounded-2xl bg-terra py-4 text-center text-lg font-medium text-on-accent shadow-card motion-safe:active:scale-[0.98]"
           >
             Practise with Shadow Me 🦜
@@ -76,7 +80,7 @@ export default async function UnitExamPage({ params }: PageProps<"/exams/unit/[u
       serverVoice={await learnerUsesServerVoice(user.id)}
       serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
       speechRate={await learnerSpeechRate(user.id)}
-      night={isNightHour(hourIn(new Date(), timeZone))}
+      night={night}
     />
   );
 }

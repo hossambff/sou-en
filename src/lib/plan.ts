@@ -62,6 +62,11 @@ export type PlanInput = {
   placementPending?: boolean;
   /** Her next open homework item, if any. */
   homework?: { id: string; title: string; titleAr: string | null; emoji: string } | null;
+  /**
+   * Her open shadow homework, if any: the Shadow bite opens Shadow Me with THAT item's unit phrases
+   * (tries on them are what count toward it), instead of the usual mixed round.
+   */
+  shadowHomeworkId?: string | null;
   /** She has practiced her current unit enough to take its exam. */
   unitExam?: { unitId: string; title: string } | null;
 };
@@ -74,6 +79,17 @@ function linkMode(input: PlanInput): PlanMode {
 
 function drillHref(path: string, mode: PlanMode) {
   return mode === "normal" ? path : `${path}?mode=${mode}`;
+}
+
+/**
+ * The Shadow Me door for one shadow homework item: the drill builds its round from that item's unit
+ * phrases. `mode` is the drill mode (true = night, kept for older callers).
+ */
+export function shadowHomeworkHref(id: string, mode: PlanMode | boolean = "normal") {
+  const params = new URLSearchParams({ homework: id });
+  const drillMode = mode === true ? "night" : mode === false ? "normal" : mode;
+  if (drillMode !== "normal") params.set("mode", drillMode);
+  return `/drill/shadow?${params}`;
 }
 
 /** Same threshold as the Home button and Practice hub (src/lib/time-of-day.ts). */
@@ -222,14 +238,20 @@ function candidates(input: PlanInput): Candidate[] {
   }
 
   if (!done.has("shadow")) {
+    // An open shadow homework: this bite IS the homework (its unit phrases), so the tries count for it
+    const homework = input.shadowHomeworkId;
     list.push({
       id: "shadow",
       title: "Shadow Hossam",
       titleAr: "عاودي ورا حسام",
       emoji: "🎧",
       minutes: 3,
-      href: drillHref("/drill/shadow", linkMode(input)),
-      reason: night ? "Whisper along, nice and soft 🤫" : "Copy the music of English: rhythm and stress 🎶",
+      href: homework ? shadowHomeworkHref(homework, linkMode(input)) : drillHref("/drill/shadow", linkMode(input)),
+      reason: homework
+        ? "Your homework phrases: copy Hossam's music 📒"
+        : night
+          ? "Whisper along, nice and soft 🤫"
+          : "Copy the music of English: rhythm and stress 🎶",
       priority: night ? 45 : 50,
     });
   }

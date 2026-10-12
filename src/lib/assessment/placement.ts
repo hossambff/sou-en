@@ -348,10 +348,16 @@ export type PlacementResult = {
   /** True until Hossam has listened to her speaking (speaking + grammar are estimates) */
   provisional: boolean;
   /**
-   * She skipped the speaking (no recording, no words): the level is a careful first guess capped at
-   * NO_SPEAKING_CAP. A retake may move her down as well as up, and needn't wait a week.
+   * She skipped the speaking (no recording, no words, or nothing could be heard): the level is a careful
+   * first guess capped at NO_SPEAKING_CAP. When this placement set her level (not a forward-only
+   * check-in), a retake may move her down as well as up, and needn't wait a week.
    */
   speakingSkipped: boolean;
+  /**
+   * Some of her spoken answers could never be heard (no speech-to-text on the phone or the server):
+   * they were left out instead of counting as silence. Missing on older rows.
+   */
+  speakingUnheard?: boolean;
   /** The unit she starts at */
   startUnit: string;
   rubric: SpeakingRubric | null;
@@ -395,6 +401,8 @@ export function buildPlacementResult(input: {
   repeat: readonly Step[];
   speaking: readonly Step[];
   samples?: readonly SpeakingSample[];
+  /** Spoken answers left out because they could never be heard (see PlacementAnswer.unheard) */
+  unheard?: number;
   verdict?: HossamVerdict | null;
 }): PlacementResult {
   const verdict = input.verdict ?? null;
@@ -433,6 +441,7 @@ export function buildPlacementResult(input: {
     wpm: wordsPerMinute(words, seconds),
     provisional: spoke && !verdict,
     speakingSkipped,
+    speakingUnheard: (input.unheard ?? 0) > 0,
     startUnit: firstUnitFor(level).id,
     rubric: verdict && spoke ? verdict.rubric : null,
     speakingCefr: verdict && spoke ? verdict.cefr : null,
@@ -506,18 +515,19 @@ export function placementUpdate(
 
 /**
  * Does this placement only move her forward? Yes when she had placed before or already made progress
- * in the course (passed a unit exam) — unless her last placement was only a first guess (speaking
- * skipped, or Hossam never listened) and she hasn't passed a unit since: then the new result replaces
- * it, down as well as up, so a too-high start can be corrected.
+ * in the course (passed a unit exam) — unless the placement that last SET her level (not a forward-only
+ * check-in since) was only a first guess (speaking skipped, or Hossam never listened) and she hasn't
+ * passed a unit since: then the new result replaces it, down as well as up, so a too-high start can be
+ * corrected.
  */
 export function placementIsForwardOnly(input: {
   /** She had placed before (or progressed) when she took this one */
   retake: boolean;
   /** She has passed a unit, or an exam set her unit */
   progressed: boolean;
-  /** Her last applied placement before this one was provisional or had no speaking */
+  /** The placement that last set her level (applied, not forward-only) was provisional or had no speaking */
   previousProvisional: boolean;
-  /** She passed a unit after that last placement */
+  /** She passed a unit after that placement */
   passedSincePrevious: boolean;
 }) {
   if (!input.retake && !input.progressed) return false;
@@ -562,13 +572,27 @@ export type PlacementAnswer =
       seconds: number;
       /** Server speech-to-text already ran on this clip (even if it heard nothing). */
       sttTried?: boolean;
+      /**
+       * Server-only: this recording can never be transcribed (no speech-to-text configured, the file was
+       * rejected, or it still failed a day later). Left out of the scoring instead of counting as silence.
+       */
+      unheard?: boolean;
     };
 
-export type PlacementSteps = Record<SectionId, Step[]> & { samples: SpeakingSample[] };
+/** A spoken answer nobody could hear (no words from the phone, and the server gave up on its clip). */
+export function isUnheard(answer: { transcript: string; unheard?: boolean }) {
+  return Boolean(answer.unheard) && englishWordCount(answer.transcript) === 0;
+}
+
+export type PlacementSteps = Record<SectionId, Step[]> & {
+  samples: SpeakingSample[];
+  /** Spoken answers left out because they could never be heard */
+  unheard: number;
+};
 
 /** Credits every answer against the bank. Answers for items no longer in the bank are ignored. */
 export function stepsFromAnswers(bank: PlacementBank, answers: readonly PlacementAnswer[]): PlacementSteps {
-  const out: PlacementSteps = { listening: [], vocab: [], repeat: [], speaking: [], samples: [] };
+  const out: PlacementSteps = { listening: [], vocab: [], repeat: [], speaking: [], samples: [], unheard: 0 };
   const seen = new Set<string>();
   for (const answer of answers) {
     const key = `${answer.section}:${answer.itemId}`;
@@ -593,6 +617,11 @@ export function stepsFromAnswers(bank: PlacementBank, answers: readonly Placemen
       case "speaking": {
         const item = bank.speaking.find((i) => i.id === answer.itemId);
         if (!item) break;
+        // Never heard (not her silence): like a question she didn't get to, it doesn't count against her
+        if (isUnheard(answer)) {
+          out.unheard++;
+          break;
+        }
         out.speaking.push({ itemId: item.id, level: item.level, credit: speakingCredit(item, answer.transcript) });
         out.samples.push({ words: englishWordCount(answer.transcript), seconds: Math.max(0, answer.seconds) });
         break;

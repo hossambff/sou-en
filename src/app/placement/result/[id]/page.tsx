@@ -2,12 +2,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { requireLearner } from "@/lib/session";
-import { getProfile } from "@/lib/learner";
+import { getProfile, profileTimeZone } from "@/lib/learner";
 import { currentUnitFor, getUnit, isCefr, unitPosition, type Cefr } from "@/lib/curriculum";
 import { CEFR_INFO } from "@/lib/progress";
 import { LEVEL_MESSAGES } from "@/lib/assessment/placement";
-import { loadPlacement } from "@/lib/assessment/placement-server";
-import { Card, LevelBadge, Shell, SkillBars } from "@/app/exams/_ui/badges";
+import { loadPlacement, placementOverview } from "@/lib/assessment/placement-server";
+import { Card, LevelBadge, Shell, SkillBars, whenLabel } from "@/app/exams/_ui/badges";
 import { RetryScoreButton } from "@/app/exams/_ui/retry-score";
 
 export const metadata = { title: "Your level · Sou Coach" };
@@ -16,7 +16,7 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
   const { user } = await requireLearner();
   const { id } = await params;
   if (!z.uuid().safeParse(id).success) notFound();
-  const [row, profile] = await Promise.all([loadPlacement(id, user.id), getProfile(user.id)]);
+  const [row, profile, overview] = await Promise.all([loadPlacement(id, user.id), getProfile(user.id), placementOverview(user.id)]);
   if (!row) notFound();
 
   const result = row.result;
@@ -53,6 +53,13 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
   const provisional = row.status === "pending";
   // Without Hossam's own words the message is the template for the measured level: use the one for hers
   const message = result.message.en === LEVEL_MESSAGES[measured]?.en ? LEVEL_MESSAGES[level] : result.message;
+  /** This placement set her level (not a forward-only check-in; older rows: not a retake). Without speaking, a first guess */
+  const setHerLevel = Boolean(result.applied) && !(result.forwardOnly ?? row.retake);
+  // Offer the retake with speaking only when it's open now (a forward-only check-in keeps the weekly rhythm)
+  const isLatest = overview.latest?.id === row.id;
+  const retakeNow = isLatest && overview.retakeAt === null;
+  const retakeFrom = isLatest ? overview.retakeAt : null;
+  const unheardAll = Boolean(result.speakingUnheard) && result.speakingSkipped;
 
   return (
     <Shell>
@@ -77,17 +84,56 @@ export default async function PlacementResultPage({ params }: PageProps<"/placem
           )}
           {result.speakingSkipped && (
             <div className="mt-4 rounded-2xl bg-saffron-soft p-3 text-left text-sm">
-              <p>
-                <span aria-hidden>🎙️</span> You skipped the speaking part, so this is a careful first guess. Take the test again with the speaking part
-                whenever you like: it shows where you really start.
-              </p>
-              <p className="ar mt-1 text-ink-soft" dir="rtl">
-                دوزتي جزء الهضرة، داكشي علاش هادا غير تقدير أولي. عاودي الاختبار مع الهضرة ملي تبغي باش نعرفو فين تبداي بصح.
-              </p>
-              <Link href="/placement" className="mt-3 block rounded-2xl border border-line bg-card py-3 text-center font-medium">
-                Take it again with speaking · ~8 min
-              </Link>
+              {unheardAll ? (
+                <>
+                  <p>
+                    <span aria-hidden>🎧</span> Hossam couldn&apos;t hear your speaking answers (speech-to-text wasn&apos;t working), so they didn&apos;t count
+                    {setHerLevel ? " and this is a careful first guess." : ". Your course stays where it was 💛"}
+                  </p>
+                  <p className="ar mt-1 text-ink-soft" dir="rtl">
+                    حسام ما قدرش يسمع الأجوبة ديالك بالهضرة، داكشي علاش ما تحسباتش.{setHerLevel ? " هادا غير تقدير أولي." : " الكورس ديالك باقي فبلاصتو 💛"}
+                  </p>
+                </>
+              ) : setHerLevel ? (
+                <>
+                  <p>
+                    <span aria-hidden>🎙️</span> You skipped the speaking part, so this is a careful first guess. Take the test again with the speaking part
+                    whenever you like: it shows where you really start.
+                  </p>
+                  <p className="ar mt-1 text-ink-soft" dir="rtl">
+                    دوزتي جزء الهضرة، داكشي علاش هادا غير تقدير أولي. عاودي الاختبار مع الهضرة ملي تبغي باش نعرفو فين تبداي بصح.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>
+                    <span aria-hidden>🎙️</span> You skipped the speaking part this time. A check-in only ever moves you forward, so your course stays where
+                    it was 💛
+                  </p>
+                  <p className="ar mt-1 text-ink-soft" dir="rtl">
+                    دوزتي جزء الهضرة هاد المرة. الاختبار كيزيد بيك غير للقدام، داكشي علاش الكورس ديالك باقي فبلاصتو 💛
+                  </p>
+                </>
+              )}
+              {retakeNow ? (
+                <Link href="/placement" className="mt-3 block rounded-2xl border border-line bg-card py-3 text-center font-medium">
+                  Take it again with speaking · ~8 min
+                </Link>
+              ) : (
+                retakeFrom && (
+                  <p className="mt-3 text-ink-soft">You can take it again with speaking from {whenLabel(retakeFrom, profileTimeZone(profile))}.</p>
+                )
+              )}
             </div>
+          )}
+          {result.speakingUnheard && !result.speakingSkipped && (
+            <p className="mt-4 rounded-2xl bg-bg-deep p-3 text-left text-sm">
+              <span aria-hidden>🎧</span> Hossam couldn&apos;t hear some of your speaking answers (speech-to-text wasn&apos;t working), so those didn&apos;t
+              count either way 💛
+              <span className="ar mt-1 block text-ink-soft" dir="rtl">
+                حسام ما قدرش يسمع شي أجوبة ديالك بالهضرة، داكشي علاش ما تحسباتش 💛
+              </span>
+            </p>
           )}
           {provisional && (
             <div className="mt-4 rounded-2xl bg-saffron-soft p-3 text-left text-sm">

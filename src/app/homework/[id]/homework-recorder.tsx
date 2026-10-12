@@ -49,6 +49,18 @@ const NO_WORDS: Bilingual = {
   en: "I couldn't hear any words in that one. Record it again, a little closer to the phone 💛",
   ar: "ما سمعت حتى كلمة فهادا. عاودي سجلي، قربي شوية من التيليفون 💛",
 };
+/** No server speech-to-text: her phone's words (or what she types) are all Hossam can read */
+const NO_WORDS_TYPE: Bilingual = {
+  en: "I couldn't hear any words in that one. Record it again, then type a few words of what you said under it 💛",
+  ar: "ما سمعت حتى كلمة فهادا. عاودي سجلي، ومن بعد كتبي شي كلمات من اللي قلتي تحتو 💛",
+};
+const UNREADABLE: Bilingual = {
+  en: "I couldn't open that recording. Please record it again 💛",
+  ar: "ما قدرتش نحل هاد التسجيل. عاودي سجليه عافاك 💛",
+};
+
+/** Why her last voice note came back to record again */
+type Retake = "no-speech" | "unreadable";
 
 type BrowserRecognition = {
   lang: string;
@@ -303,8 +315,8 @@ export function HomeworkRecorder(props: {
   serverStt: boolean;
   speechRate: number;
   night: boolean;
-  /** Her last voice note for this item had no words in it: ask gently for a new one */
-  heardNothing?: boolean;
+  /** Her last voice note for this item came back (no words in it, or it couldn't be opened): ask gently for a new one */
+  retake?: Retake | null;
 }) {
   const router = useRouter();
   const mic = useRecorder();
@@ -312,7 +324,13 @@ export function HomeworkRecorder(props: {
   const [take, setTake] = useState<(Take & { url: string }) | null>(null);
   const [typed, setTyped] = useState("");
   const [error, setError] = useState<Problem | null>(null);
-  const [noWords, setNoWords] = useState(Boolean(props.heardNothing));
+  // Shown above the task until she records again; follows the server (router.refresh after a send)
+  const [notice, setNotice] = useState<Retake | null>(props.retake ?? null);
+  const [seenRetake, setSeenRetake] = useState<Retake | null>(props.retake ?? null);
+  if ((props.retake ?? null) !== seenRetake) {
+    setSeenRetake(props.retake ?? null);
+    setNotice(props.retake ?? null);
+  }
   const [reading, setReading] = useState(false);
   const [warm, setWarm] = useState<Warm>({ state: "idle" });
   const speaker = useRef<Speaker | null>(null);
@@ -418,7 +436,7 @@ export function HomeworkRecorder(props: {
       setError({ message: started === "mic" ? MIC_LOST : NO_RECORDING });
       return setPhase("error");
     }
-    setNoWords(false);
+    setNotice(null);
     setPhase("recording");
   }
 
@@ -428,6 +446,11 @@ export function HomeworkRecorder(props: {
     setTake(null);
     setTyped("");
     setPhase("task");
+  }
+
+  function retakeMessage(reason: Retake) {
+    if (reason === "unreadable") return UNREADABLE;
+    return props.serverStt ? NO_WORDS : NO_WORDS_TYPE;
   }
 
   async function send() {
@@ -442,7 +465,7 @@ export function HomeworkRecorder(props: {
     const transcript = (props.serverStt ? result.transcript || typedText : typedText || result.transcript).slice(0, 4000);
     if (!transcript && result.heardNothing) {
       // Hossam's ears answered and heard no words: sending it would only come back empty
-      setError({ message: NO_WORDS, retake: true });
+      setError({ message: retakeMessage("no-speech"), retake: true });
       return setPhase("error");
     }
     if (!result.clipId && !transcript) {
@@ -461,10 +484,10 @@ export function HomeworkRecorder(props: {
         }),
       });
       if (response.ok) {
-        const data = (await response.json().catch(() => null)) as { status?: string } | null;
-        // No words in it after all: the homework is open again, record it once more
+        const data = (await response.json().catch(() => null)) as { status?: string; reason?: string } | null;
+        // No words in it after all (or it couldn't be opened): the homework is open again, record it once more
         if (data?.status === "retake") {
-          setError({ message: NO_WORDS, retake: true });
+          setError({ message: retakeMessage(data.reason === "unreadable" ? "unreadable" : "no-speech"), retake: true });
           setPhase("error");
         }
         return router.refresh();
@@ -536,10 +559,18 @@ export function HomeworkRecorder(props: {
 
   return (
     <div className="space-y-4">
-      {phase === "task" && noWords && (
+      {phase === "task" && notice === "unreadable" && (
+        <p className="rounded-2xl bg-saffron-soft px-3 py-2 text-sm" role="status">
+          I couldn&apos;t open your last recording. Please record it again 💛
+          <span className="ar mt-0.5 block text-ink-soft" dir="rtl">
+            ما قدرتش نحل التسجيل اللخر. عاودي سجليه عافاك 💛
+          </span>
+        </p>
+      )}
+      {phase === "task" && notice === "no-speech" && (
         <p className="rounded-2xl bg-saffron-soft px-3 py-2 text-sm" role="status">
           I couldn&apos;t hear any words in your last voice note. Record it again, a little closer to the phone
-          {props.serverStt ? "" : ", or type a few words of what you said"} 💛
+          {props.serverStt ? "" : ", then type a few words of what you said"} 💛
           <span className="ar mt-0.5 block text-ink-soft" dir="rtl">
             ما سمعت حتى كلمة فالأوديو اللخر. عاودي سجلي، قربي شوية من التيليفون 💛
           </span>
@@ -683,7 +714,9 @@ export function HomeworkRecorder(props: {
             {!props.serverStt && (
               <label className="block">
                 <span className="text-sm text-ink-soft">
-                  {take.transcript ? "Here's what I heard (fix it if you like):" : "Optional: type a few words of what you said"}
+                  {take.transcript
+                    ? "Here's what I heard (fix it if you like):"
+                    : "Your phone didn't catch the words. Type a few of them so Hossam can read your answer:"}
                 </span>
                 <textarea
                   value={typed}

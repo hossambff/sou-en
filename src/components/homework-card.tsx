@@ -7,14 +7,16 @@ import { retryWaitingReviews } from "@/app/api/homework/review";
  * Home's homework card (server component). Home builds the board first (homeworkBoard: completes
  * drill homework she has earned and tops up her current unit's set) so Today's plan and the points
  * see the same state; this shows up to 2 open items, or "All done for today 🌱". Reviews left waiting
- * (Claude was down) are retried in the background after the page is sent. Renders nothing without a board.
+ * (Claude was down) are retried in the background after the page is sent, within `reviewDeadline`
+ * (Home's request start + REVIEW_BUDGET_MS: the page's maxDuration counts from there, not from now).
+ * Renders nothing without a board.
  */
-export function HomeworkCard({ board }: { board: HomeworkBoard | null }) {
+export function HomeworkCard({ board, reviewDeadline }: { board: HomeworkBoard | null; reviewDeadline: number }) {
   if (!board) return null;
 
   const userId = board.profile.user_id;
   const retry = reviewsToRetry(board.waiting);
-  if (retry.length > 0) after(() => retryWaitingReviews(userId, retry));
+  if (retry.length > 0) after(() => retryWaitingReviews(userId, retry, reviewDeadline));
 
   const items = board.open.slice(0, 2);
   const freshFeedback = board.done.find((item) => item.day === board.today && item.feedback?.type === "coach");
@@ -51,7 +53,11 @@ export function HomeworkCard({ board }: { board: HomeworkBoard | null }) {
                     <p className="truncate text-sm font-medium">{item.title}</p>
                     <p className="text-xs text-ink-soft">
                       {dueLabel(item.due_on, board.today).en}
-                      {progress && progress.done > 0 ? ` · ${Math.min(progress.done, progress.goal)} of ${progress.goal} done` : " · no rush"}
+                      {item.submission?.heardNothing
+                        ? " · record it again 💛"
+                        : progress && progress.done > 0
+                          ? ` · ${Math.min(progress.done, progress.goal)} of ${progress.goal} done`
+                          : " · no rush"}
                     </p>
                   </div>
                   <span aria-hidden className="text-ink-soft">

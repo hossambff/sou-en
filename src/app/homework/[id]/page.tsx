@@ -113,10 +113,10 @@ export default async function HomeworkItemPage({ params }: PageProps<"/homework/
               serverStt={Boolean(process.env.ELEVENLABS_API_KEY)}
               speechRate={await learnerSpeechRate(user.id)}
               night={night}
-              heardNothing={Boolean(item.submission?.heardNothing)}
+              retake={item.submission?.heardNothing ? (item.submission.unreadable ? "unreadable" : "no-speech") : null}
             />
           ) : (
-            <HomeworkResult item={item} />
+            <HomeworkResult item={item} serverStt={Boolean(process.env.ELEVENLABS_API_KEY)} />
           )
         ) : item.status === "reviewed" ? (
           <HomeworkResult item={item} />

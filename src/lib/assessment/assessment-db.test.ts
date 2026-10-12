@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { LISTENING_ITEMS, SPEAKING_PROMPTS, UNITS, VOCAB_ITEMS, firstUnitFor, nextUnit, type Unit } from "@/lib/curriculum";
+import { LISTENING_ITEMS, REPEAT_ITEMS, SPEAKING_PROMPTS, UNITS, VOCAB_ITEMS, firstUnitFor, nextUnit, type Unit } from "@/lib/curriculum";
 import type { PlacementAnswer } from "./placement";
+import type { VerdictSource } from "./placement-server";
 import { buildUnitExam, type ExamAnswer } from "./exam";
 import { CLAUDE_MAX_MS, CLAUDE_MIN_MS } from "./budget";
 
@@ -14,6 +15,12 @@ import { CLAUDE_MAX_MS, CLAUDE_MIN_MS } from "./budget";
 const url = process.env.TEST_DATABASE_URL;
 
 vi.mock("server-only", () => ({}));
+// Speech-to-text usage counters live outside the test transaction: never touch them from a test
+vi.mock("@/lib/usage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/usage")>()),
+  getUsage: async () => 0,
+  bumpUsage: async () => {},
+}));
 
 describe.skipIf(!url)("placement + exams against Postgres (rolled back)", () => {
   const sou = `vitest-sou-${randomUUID()}`;
@@ -352,19 +359,120 @@ describe.skipIf(!url)("placement + exams against Postgres (rolled back)", () => 
     expect(s.unitExamPendingId).toBeNull();
   });
 
-  it("while a speaking clip waits for its transcript, Hossam isn't asked (and paid) for a partial verdict", async () => {
+  /** One of her saved recordings (the bytes don't matter: speech-to-text is faked). */
+  const clipFor = async (userId: string, kind: "placement" | "exam") =>
+    (
+      await client.query<{ id: string }>(`insert into audio_clip (user_id, kind, mime, data) values ($1, $2, 'audio/webm', '\\x00'::bytea) returning id`, [
+        userId,
+        kind,
+      ])
+    ).rows[0].id;
+  /** Speech-to-text is configured but down (503) for the duration of `run`. */
+  const duringSttOutage = async (run: (fetch: ReturnType<typeof vi.fn>) => Promise<void>) => {
+    process.env.ELEVENLABS_API_KEY = "test-key";
+    const fetch = vi.fn(async () => new Response("{}", { status: 503 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      await run(fetch);
+    } finally {
+      vi.unstubAllGlobals();
+      delete process.env.ELEVENLABS_API_KEY;
+    }
+  };
+
+  it("while a speaking clip waits for its transcript, Hossam isn't asked (and paid) for a partial verdict; a day later it's given up on", async () => {
     const zineb = await newLearner();
+    const clip = await clipFor(zineb, "placement");
     const waiting: PlacementAnswer[] = [
       ...answers, // one spoken answer with words…
-      { section: "speaking", itemId: SPEAKING_PROMPTS[1].id, transcript: "", clipId: randomUUID(), seconds: 30 }, // …one still without
+      { section: "speaking", itemId: SPEAKING_PROMPTS[1].id, transcript: "", clipId: clip, seconds: 30 }, // …one still without
     ];
     const id = randomUUID();
     await placement.savePlacement({ id, userId: zineb, answers: waiting, elapsedSeconds: 300 }, client);
+    await duringSttOutage(async (fetch) => {
+      const ask = vi.fn<VerdictSource>(a1Verdict);
+      const outcome = await placement.scorePlacement(id, zineb, client, ask);
+      expect(outcome).toMatchObject({ status: "pending", reason: "no-transcript" });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(ask).not.toHaveBeenCalled();
+      expect((await profileOf(zineb)).placement_status).toBe("done"); // provisional level applied anyway
+
+      // A day later speech-to-text still can't hear it: it's left out and Hossam grades the rest
+      await client.query(`update placement_test set finished_at = now() - interval '25 hours' where id = $1`, [id]);
+      expect(await placement.scorePlacement(id, zineb, client, ask)).toEqual({ status: "scored", level: "A1" });
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(ask.mock.calls[0][0].answers.map((a) => a.itemId)).toEqual([speaking.id]);
+      const row = await placement.loadPlacement(id, zineb, client);
+      expect(row?.status).toBe("scored");
+      expect(row?.answers.find((a) => a.section === "speaking" && a.clipId === clip)).toMatchObject({ sttTried: true, unheard: true });
+      expect(row?.result?.speakingUnheard).toBe(true);
+      expect(row?.result?.speakingSkipped).toBe(false); // she did speak: the heard answer counts
+    });
+  });
+
+  it("without server speech-to-text, a placement answer the phone couldn't hear is left out at once (never pending)", async () => {
+    const yasmine = await newLearner();
+    const clip = await clipFor(yasmine, "placement");
+    const id = randomUUID();
+    const unheardOnly: PlacementAnswer[] = [
+      ...answers.filter((a) => a.section !== "speaking"),
+      { section: "speaking", itemId: speaking.id, transcript: "", clipId: clip, seconds: 30 },
+    ];
+    await placement.savePlacement({ id, userId: yasmine, answers: unheardOnly, elapsedSeconds: 300 }, client);
     const ask = vi.fn(a1Verdict);
-    const outcome = await placement.scorePlacement(id, zineb, client, ask);
-    expect(outcome).toMatchObject({ status: "pending", reason: "no-transcript" });
-    expect(ask).not.toHaveBeenCalled();
-    expect((await profileOf(zineb)).placement_status).toBe("done"); // provisional level applied anyway
+    const outcome = await placement.scorePlacement(id, yasmine, client, ask);
+    expect(outcome.status).toBe("scored");
+    expect(ask).not.toHaveBeenCalled(); // nothing heard, nothing to grade
+    const row = await placement.loadPlacement(id, yasmine, client);
+    expect(row?.result).toMatchObject({ speakingUnheard: true, speakingSkipped: true }); // a capped first guess
+    expect((await placement.placementOverview(yasmine, client)).retakeAt).toBeNull(); // she may retake it with speaking now
+  });
+
+  it("an exam recording nobody can hear is graded without it (not as silence) instead of waiting forever", async () => {
+    const hana = await newLearner();
+    const clip = await clipFor(hana, "exam");
+    const speakTask = buildUnitExam(a1, seed).find((t) => t.kind === "speak")!;
+    const withUnheard = goodAnswers(a1).map((a): ExamAnswer => (a.taskId === speakTask.id && a.kind === "speak" ? { ...a, transcript: "", clipId: clip } : a));
+    const id = randomUUID();
+    expect((await exams.saveExam({ id, userId: hana, unit: a1, seed, answers: withUnheard, elapsedSeconds: 300 }, client)).outcome).toBe("created");
+    const outcome = await exams.gradeExam(id, hana, client, grades(5));
+    expect(outcome).toMatchObject({ status: "scored", passed: true });
+    const row = await exams.loadExam(id, hana, client);
+    expect(row?.answers.find((a) => a.taskId === speakTask.id)).toMatchObject({ sttTried: true, unheard: true });
+    expect(row?.feedback?.perTask[speakTask.id]).toBeUndefined(); // not a 0
+    expect(row?.feedback?.grades.map((g) => g.taskId)).not.toContain(speakTask.id);
+  });
+
+  it("an exam still waiting for its transcript after a day never blocks the plan, and is then graded without it", async () => {
+    const rana = await newLearner();
+    for (const activity of ["chat", "shadow"]) {
+      await client.query(`insert into coach_session (user_id, activity, started_at, ended_at, speaking_seconds) values ($1, $2, now(), now(), 30)`, [
+        rana,
+        activity,
+      ]);
+    }
+    const clip = await clipFor(rana, "exam");
+    const answersWithClip = goodAnswers(a1).map((a): ExamAnswer => (a.kind === "speak" || a.kind === "roleplay" ? { ...a, transcript: "", clipId: clip } : a));
+    const id = randomUUID();
+    expect((await exams.saveExam({ id, userId: rana, unit: a1, seed, answers: answersWithClip, elapsedSeconds: 300 }, client)).outcome).toBe("created");
+    await duringSttOutage(async () => {
+      expect(await exams.gradeExam(id, rana, client, grades(5))).toEqual({ status: "pending", reason: "no-transcript" });
+      let s = await status.getAssessmentStatus(rana, client);
+      expect(s.unitExamPendingId).toBe(id);
+      expect(s.unitExamReady).toBe(false);
+
+      await client.query(`update exam set finished_at = now() - interval '25 hours' where id = $1`, [id]);
+      s = await status.getAssessmentStatus(rana, client);
+      expect(s.unitExamPendingId).toBeNull(); // too old to hold the plan back
+      expect(s.unitExamReady).toBe(true);
+
+      const outcome = await exams.gradeExam(id, rana, client, grades(5));
+      expect(outcome.status).toBe("scored");
+      const row = await exams.loadExam(id, rana, client);
+      expect(row?.answers.filter((a) => (a.kind === "speak" || a.kind === "roleplay") && a.unheard)).toHaveLength(
+        row?.tasks.filter((t) => t.kind === "speak" || t.kind === "roleplay").length ?? -1,
+      );
+    });
   });
 
   it("the speaking verdict gets a bounded time budget", async () => {
@@ -429,6 +537,124 @@ describe.skipIf(!url)("placement + exams against Postgres (rolled back)", () => 
     expect((await placement.savePlacement({ id: retake, userId: amal, answers, elapsedSeconds: 300 }, client)).outcome).toBe("created");
     await placement.scorePlacement(retake, amal, client, a1Verdict);
     expect(await profileOf(amal)).toMatchObject({ cefr_level: "B1", current_unit: b1.id });
+  });
+
+  it("B2 → a retake that skips speaking → retakes: a forward-only check-in never makes a full placement replaceable", async () => {
+    const houda = await newLearner();
+    const b2Unit = firstUnitFor("B2");
+    const strong: PlacementAnswer[] = [
+      ...LISTENING_ITEMS.map((i): PlacementAnswer => ({ section: "listening", itemId: i.id, choice: i.answer, replays: 0 })),
+      ...VOCAB_ITEMS.map((i): PlacementAnswer => ({ section: "vocab", itemId: i.id, said: i.accepted[0], typed: false })),
+      ...REPEAT_ITEMS.map((i): PlacementAnswer => ({ section: "repeat", itemId: i.id, score: 95, engine: "basic", heard: i.text, sounds: [] })),
+      ...SPEAKING_PROMPTS.slice(0, 3).map(
+        (i): PlacementAnswer => ({
+          section: "speaking",
+          itemId: i.id,
+          transcript: "Well I usually wake up early because my baby needs me and then I try to read a little before the day starts",
+          clipId: null,
+          seconds: 40,
+        }),
+      ),
+    ];
+    const silent: PlacementAnswer[] = [
+      ...LISTENING_ITEMS.map((i): PlacementAnswer => ({ section: "listening", itemId: i.id, choice: i.answer, replays: 0 })),
+      ...VOCAB_ITEMS.filter((i) => i.level !== "B2" && i.level !== "C1").map(
+        (i): PlacementAnswer => ({ section: "vocab", itemId: i.id, said: i.accepted[0], typed: false }),
+      ),
+    ];
+    const b2Verdict = async () => ({
+      rubric: {
+        fluency: { score: 4, evidence: "" },
+        range: { score: 4, evidence: "" },
+        accuracy: { score: 4, evidence: "" },
+        coherence: { score: 4, evidence: "" },
+      },
+      cefr: "B2" as const,
+      strengths: [],
+      focus: [],
+      message: "Great!",
+      messageAr: "مزيان!",
+    });
+    /** A week passes (every placement moves 8 days into the past, in order). */
+    const aWeekLater = () => client.query(`update placement_test set finished_at = finished_at - interval '8 days' where user_id = $1`, [houda]);
+    const take = async (answersNow: PlacementAnswer[], ask: Parameters<typeof placement.scorePlacement>[3]) => {
+      const id = randomUUID();
+      expect((await placement.savePlacement({ id, userId: houda, answers: answersNow, elapsedSeconds: 300 }, client)).outcome).toBe("created");
+      await placement.scorePlacement(id, houda, client, ask);
+      return id;
+    };
+    const stillB2 = async () => {
+      expect(await profileOf(houda)).toMatchObject({ cefr_level: "B2", current_unit: b2Unit.id });
+      const progress = await client.query(`select 1 from unit_progress where user_id = $1 and unit_id = $2`, [houda, b2Unit.id]);
+      expect(progress.rowCount).toBe(1); // her B2 unit is never dropped
+    };
+
+    // P1: a full placement with speaking, graded B2 by Hossam
+    const p1 = await take(strong, b2Verdict);
+    expect((await placement.loadPlacement(p1, houda, client))?.result).toMatchObject({ level: "B2", forwardOnly: false });
+    await stillB2();
+
+    // P2, eight days later: the baby is asleep, she skips the speaking. Forward-only: she stays B2
+    await aWeekLater();
+    const p2 = await take(silent, unavailable);
+    expect((await placement.loadPlacement(p2, houda, client))?.result).toMatchObject({ speakingSkipped: true, forwardOnly: true });
+    await stillB2();
+    // P2 didn't set her level, so it keeps the weekly rhythm (no "retake right away" invitation)
+    const overview = await placement.placementOverview(houda, client);
+    expect(overview.latest).toMatchObject({ id: p2, speakingSkipped: true, setLevel: false });
+    expect(overview.retakeAt).not.toBeNull();
+    expect((await placement.savePlacement({ id: randomUUID(), userId: houda, answers: silent, elapsedSeconds: 60 }, client)).outcome).toBe("too-soon");
+
+    // P3, a week later: skips the speaking again. Still judged against P1 (verified): forward-only
+    await aWeekLater();
+    const p3 = await take(silent, unavailable);
+    expect((await placement.loadPlacement(p3, houda, client))?.result?.forwardOnly).toBe(true);
+    await stillB2();
+
+    // P4, a week later: speaks on a tired day (weak answers): never sends her back
+    await aWeekLater();
+    const weak: PlacementAnswer[] = [{ section: "speaking", itemId: speaking.id, transcript: "My name is Sou", clipId: null, seconds: 20 }];
+    const p4 = await take(weak, a1Verdict);
+    expect((await placement.loadPlacement(p4, houda, client))?.result?.forwardOnly).toBe(true);
+    await stillB2();
+
+    // P5: a normal retake Hossam can't grade (stays pending, provisional)…
+    await aWeekLater();
+    const p5 = await take(weak, unavailable);
+    expect((await placement.loadPlacement(p5, houda, client))?.status).toBe("pending");
+    await stillB2();
+    // …P6 a week later is still forward-only: P5 never set her level either
+    await aWeekLater();
+    const p6 = await take(weak, a1Verdict);
+    expect((await placement.loadPlacement(p6, houda, client))?.result?.forwardOnly).toBe(true);
+    await stillB2();
+  });
+
+  it("a skipped-speaking retake that replaced a first guess is itself a first guess (retake right away, may move her)", async () => {
+    const leila = await newLearner();
+    const silent: PlacementAnswer[] = [
+      ...LISTENING_ITEMS.map((i): PlacementAnswer => ({ section: "listening", itemId: i.id, choice: i.answer, replays: 0 })),
+      ...VOCAB_ITEMS.filter((i) => i.level !== "B2" && i.level !== "C1").map(
+        (i): PlacementAnswer => ({ section: "vocab", itemId: i.id, said: i.accepted[0], typed: false }),
+      ),
+    ];
+    const first = randomUUID();
+    await placement.savePlacement({ id: first, userId: leila, answers: silent, elapsedSeconds: 300 }, client);
+    await placement.scorePlacement(first, leila, client, unavailable);
+    await client.query(`update placement_test set finished_at = now() - interval '1 hour' where id = $1`, [first]);
+    const second = randomUUID();
+    expect((await placement.savePlacement({ id: second, userId: leila, answers: silent, elapsedSeconds: 300 }, client)).outcome).toBe("created");
+    await placement.scorePlacement(second, leila, client, unavailable);
+    expect((await placement.loadPlacement(second, leila, client))?.result?.forwardOnly).toBe(false); // it replaced the first guess
+    const overview = await placement.placementOverview(leila, client);
+    expect(overview.latest).toMatchObject({ id: second, setLevel: true, speakingSkipped: true });
+    expect(overview.retakeAt).toBeNull();
+    await client.query(`update placement_test set finished_at = finished_at - interval '1 hour' where user_id = $1`, [leila]);
+    const third = randomUUID();
+    const weak: PlacementAnswer[] = [{ section: "speaking", itemId: speaking.id, transcript: "My name is Sou", clipId: null, seconds: 20 }];
+    expect((await placement.savePlacement({ id: third, userId: leila, answers: weak, elapsedSeconds: 300 }, client)).outcome).toBe("created");
+    expect(await placement.scorePlacement(third, leila, client, a1Verdict)).toEqual({ status: "scored", level: "A1" });
+    expect(await profileOf(leila)).toMatchObject({ cefr_level: "A1", current_unit: a1.id });
   });
 
   it("a check-up never overrides the level set by the placement or exams", async () => {

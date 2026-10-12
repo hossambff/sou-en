@@ -5,6 +5,7 @@ import { ScoreRing } from "@/app/drill/drill-ui";
 import { shortDate } from "@/lib/progress";
 import type { CoachFeedback, HomeworkItem } from "@/lib/homework";
 import { RetryButton } from "./retry-button";
+import { TypeTranscript } from "./type-transcript";
 import { WordChips, scoreTone } from "./word-chips";
 
 function scoreLine(score: number) {
@@ -14,8 +15,12 @@ function scoreLine(score: number) {
   return { en: "You showed up, that's the hard part 💛", ar: "جيتي، وهادي هي الصعيبة 💛" };
 }
 
-/** Her handed-in homework: Hossam's review (or "he'll listen soon"), or a drill item's well-done. */
-export function HomeworkResult({ item }: { item: HomeworkItem }) {
+/**
+ * Her handed-in homework: Hossam's review (or "he'll listen soon"), or a drill item's well-done.
+ * `serverStt`: this server can transcribe recordings (without it, a note with no words waits for her
+ * to type them).
+ */
+export function HomeworkResult({ item, serverStt = true }: { item: HomeworkItem; serverStt?: boolean }) {
   const feedback = item.feedback;
 
   if (feedback?.type === "auto") {
@@ -52,6 +57,8 @@ export function HomeworkResult({ item }: { item: HomeworkItem }) {
   ) : null;
 
   if (item.status === "submitted" || feedback?.type !== "coach") {
+    // No words to read yet: she can type them (without server speech-to-text, that's the only way)
+    const noWords = item.status === "submitted" && !submission?.transcript?.trim();
     return (
       <div className="space-y-4">
         <section className="rounded-[2rem] border border-line bg-card p-5 text-center shadow-card animate-rise">
@@ -66,8 +73,9 @@ export function HomeworkResult({ item }: { item: HomeworkItem }) {
             Your voice note is saved and your {item.points} points already count. His feedback will appear right here.
           </p>
           {/* Asks by itself once when she opens it (Claude may be back since the first try) */}
-          <RetryButton id={item.id} auto={item.status === "submitted"} />
+          {!(noWords && !serverStt) && <RetryButton id={item.id} auto={item.status === "submitted"} />}
         </section>
+        {noWords && <TypeTranscript id={item.id} serverStt={serverStt} />}
         {(recording || transcript) && (
           <section className="space-y-2 rounded-3xl border border-line bg-card p-4 shadow-card">
             {recording}

@@ -95,13 +95,21 @@ export async function practiceCountSince(userId: string, since: Date | string | 
   return row?.n ?? 0;
 }
 
-/** Her ungraded (pending) exam for this unit, newest first, if any. */
+/**
+ * An ungraded exam holds back the plan's "take the exam" for this long at most. After that (Hossam or
+ * speech-to-text still unavailable) she is offered the exam again; the old one is still graded if he
+ * gets to it later.
+ */
+export const PENDING_EXAM_HOLD_HOURS = 24;
+
+/** Her ungraded (pending) exam for this unit from the last PENDING_EXAM_HOLD_HOURS, newest first, if any. */
 export function pendingExamFor(userId: string, unitId: string, db: Db = defaultDb) {
   return one<{ id: string }>(
     db,
     `select id from exam where user_id = $1 and unit_id = $2 and kind = 'unit' and status = 'pending'
+        and coalesce(finished_at, started_at) > now() - make_interval(hours => $3)
       order by finished_at desc nulls last limit 1`,
-    [userId, unitId],
+    [userId, unitId, PENDING_EXAM_HOLD_HOURS],
   );
 }
 
@@ -133,16 +141,20 @@ export async function moveOffPassedUnit(userId: string, db: Db = defaultDb): Pro
   });
 }
 
-/** When she may retry this unit's exam after a fail (null = now). */
-export async function unitRetryAt(userId: string, unitId: string, db: Db = defaultDb) {
-  const lastFail = await one<{ finished_at: Date }>(
+/** Her latest failed (graded) attempt at this unit's exam, if any. */
+export function lastFailedExam(userId: string, unitId: string, db: Db = defaultDb) {
+  return one<{ id: string; finished_at: Date }>(
     db,
-    `select finished_at from exam
+    `select id, finished_at from exam
       where user_id = $1 and unit_id = $2 and kind = 'unit' and status = 'scored' and passed = false and finished_at is not null
       order by finished_at desc limit 1`,
     [userId, unitId],
   );
-  return examRetryAt(lastFail?.finished_at);
+}
+
+/** When she may retry this unit's exam after a fail (null = now). */
+export async function unitRetryAt(userId: string, unitId: string, db: Db = defaultDb) {
+  return examRetryAt((await lastFailedExam(userId, unitId, db))?.finished_at);
 }
 
 /** May she take this unit's exam? Her current unit, or one she already passed (to improve her score). */
@@ -278,7 +290,8 @@ async function gradeClaimed(id: string, userId: string, db: Db, askHossam: Grade
   const unit = getUnit(row.unit_id) ?? null;
   const level: Cefr = unit?.level ?? (isCefr(row.level) ? row.level : "A1");
 
-  const filled = await fillTranscripts(row.answers, (a) => (isRecording(a) ? a : null), userId, db);
+  // A clip that can never be heard (or still can't a day later) is left out instead of waiting forever
+  const filled = await fillTranscripts(row.answers, (a) => (isRecording(a) ? a : null), userId, db, row.finished_at);
   const answers = filled.answers;
   const waitingForTranscript = answers.some((a) => isRecording(a) && a.clipId && !a.transcript.trim() && !a.sttTried);
   const toGrade = answersToGrade(row.tasks, answers) as GradeInput["items"];

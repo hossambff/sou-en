@@ -158,7 +158,7 @@ export default async function ExamsPage() {
                   {isCefr(placement.latest.cefr) ? `${placement.latest.cefr} · ` : ""}
                   {placement.latest.finishedAt ? shortDay(placement.latest.finishedAt, timeZone) : ""}
                   {placement.latest.status === "pending" ? " · Hossam will listen soon 🎧" : ""}
-                  {placement.latest.speakingSkipped ? " · speaking skipped" : ""}
+                  {placement.latest.speakingSkipped ? (placement.latest.speakingUnheard ? " · speaking not heard" : " · speaking skipped") : ""}
                 </p>
               ) : (
                 <p className="text-sm text-ink-soft">8 minutes to start at your real level. Whenever you&apos;re ready.</p>

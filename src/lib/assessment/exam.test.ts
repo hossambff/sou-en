@@ -19,6 +19,7 @@ import {
   seededRandom,
   skillsAfterExam,
   toGlobalScale,
+  unheardAnswer,
   youify,
   type ExamAnswer,
   type ExamGrade,
@@ -184,6 +185,23 @@ describe("scoring", () => {
     expect(scoreExam(tasks, unmeasured, null).parts.repeat).toBeNull();
     const skipped = base.map((a) => (a.kind === "repeat" ? { ...a, score: 0, engine: "none" as const } : a));
     expect(scoreExam(tasks, skipped, null).parts.repeat).toBe(0);
+  });
+
+  it("a recording nobody could hear (no speech-to-text) is left out, not scored as silence", () => {
+    const base = answersWith({ sayRight: 4, repeatScore: 100, spoken: "Hello I am Sou" });
+    const unheard = base.map((a) => (a.kind === "speak" || a.kind === "roleplay" ? { ...a, transcript: "", unheard: true } : a));
+    const breakdown = scoreExam(tasks, unheard, null);
+    expect(breakdown.needsGrading).toBe(false);
+    expect(breakdown.parts.speak).toBeNull();
+    expect(breakdown.parts.roleplay).toBeNull();
+    for (const t of spoken) expect(breakdown.perTask[t.id]).toBeUndefined();
+    expect(breakdown.total).toBe(100); // from the say and repeat parts she did
+    expect(unheard.filter(unheardAnswer)).toHaveLength(spoken.length);
+    expect(answersToGrade(tasks, unheard)).toHaveLength(0);
+    // Words the phone did catch always count, flag or not
+    const caught = base.map((a) => (a.kind === "speak" ? { ...a, unheard: true } : a));
+    expect(caught.filter(unheardAnswer)).toHaveLength(0);
+    expect(scoreExam(tasks, caught, null).needsGrading).toBe(true);
   });
 
   it("examTotal renormalizes over the parts present", () => {

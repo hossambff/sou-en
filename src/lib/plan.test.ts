@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPlan, dayNumber, greetingFor, greetingLine, isNight, planMinutes, type PlanInput } from "./plan";
+import { buildPlan, dayNumber, greetingFor, greetingLine, isNight, planMinutes, shadowHomeworkHref, type PlanInput } from "./plan";
 import { isNightHour } from "./time-of-day";
 
 const base: PlanInput = {
@@ -117,6 +117,30 @@ describe("daily plan", () => {
     });
     const roleplay = plan.find((bite) => bite.id === "roleplay");
     expect(roleplay?.href).toContain("scenario=pharmacy");
+  });
+});
+
+describe("the Shadow bite and an open shadow homework", () => {
+  const HW = "6f1c2c6e-8f0a-4c43-9d36-3f1f6f7f9a10";
+  const shadow = (input: Partial<PlanInput>) => buildPlan({ ...base, minutes: 20, ...input }).find((bite) => bite.id === "shadow");
+
+  it("opens the homework's own phrases, so the tries count for it", () => {
+    const bite = shadow({ shadowHomeworkId: HW });
+    expect(bite?.href).toBe(`/drill/shadow?homework=${HW}`);
+    expect(bite?.href).toBe(shadowHomeworkHref(HW));
+    expect(bite?.reason).toMatch(/homework/i);
+  });
+
+  it("keeps her mode on the homework link", () => {
+    expect(shadow({ shadowHomeworkId: HW, mode: "whisper" })?.href).toBe(`/drill/shadow?homework=${HW}&mode=whisper`);
+    expect(shadow({ shadowHomeworkId: HW, hour: 23, minutes: 10, babyName: null })?.href).toBe(`/drill/shadow?homework=${HW}&mode=night`);
+    expect(shadow({ shadowHomeworkId: HW, hour: 23, minutes: 10, babyName: null, mode: "normal" })?.href).toBe(`/drill/shadow?homework=${HW}`);
+  });
+
+  it("is the usual mixed round without one", () => {
+    expect(shadow({})?.href).toBe("/drill/shadow");
+    expect(shadow({ shadowHomeworkId: null })?.href).toBe("/drill/shadow");
+    expect(shadow({ mode: "night" })?.href).toBe("/drill/shadow?mode=night");
   });
 });
 

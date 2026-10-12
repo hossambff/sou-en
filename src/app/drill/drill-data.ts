@@ -1,6 +1,6 @@
 import "server-only";
 import { query, queryOne } from "@/lib/db";
-import { getUnit } from "@/lib/curriculum";
+import { getUnit, type Chunk } from "@/lib/curriculum";
 import { syncAutoHomework, unitShadowItems, type HomeworkPayload } from "@/lib/homework";
 import { getProfile } from "@/lib/learner";
 import { monthOfJourney } from "@/lib/progress";
@@ -78,6 +78,51 @@ export async function homeworkShadowRound(userId: string, homeworkId: string): P
   );
   if (!item) return null;
   const items = unitShadowItems(item.payload?.chunks, getUnit(item.unit_id)?.sound);
+  return items.length > 0 ? items : null;
+}
+
+/** Phrases in a unit round (the same as a shadow homework round). */
+const UNIT_ROUND = 5;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The Shadow Me door for one unit (the exam pages' "Practise with Shadow Me"): a round of that unit's
+ * phrases, led by the ones exam `examId` asked her to practise.
+ */
+export function unitShadowHref(unitId: string, examId?: string | null, night = false) {
+  const params = new URLSearchParams({ unit: unitId });
+  if (examId) params.set("exam", examId);
+  if (night) params.set("mode", "night");
+  return `/drill/shadow?${params}`;
+}
+
+/**
+ * A Shadow Me round from one unit's phrases: first the ones her exam (`examId`, hers and for this unit)
+ * listed under "What to practise", then the unit's other phrases, the ones she hasn't shadowed in the
+ * last 3 days first. null → unknown unit (the caller runs a normal round).
+ */
+export async function unitShadowRound(userId: string, unitId: unknown, examId?: unknown): Promise<ShadowItem[] | null> {
+  const unit = typeof unitId === "string" ? getUnit(unitId) : undefined;
+  if (!unit) return null;
+  const [exam, recent] = await Promise.all([
+    typeof examId === "string" && UUID.test(examId)
+      ? queryOne<{ chunks: Chunk[] | null }>(
+          `select feedback->'plan'->'chunks' as chunks from exam where id = $1 and user_id = $2 and unit_id = $3 and kind = 'unit'`,
+          [examId, userId, unit.id],
+        )
+      : null,
+    query<{ target: string }>(
+      `select distinct target from drill_attempt where user_id = $1 and kind = 'shadow' and created_at > now() - interval '3 days'`,
+      [userId],
+    ),
+  ]);
+  const key = (chunk: Chunk) => chunk.en.replace(/\s+/g, " ").trim().toLowerCase();
+  const recentTargets = new Set(recent.map((r) => r.target.replace(/\s+/g, " ").trim().toLowerCase()));
+  // Only the unit's own phrases (the exam's list is stored data: never trust it to be anything else)
+  const missed = (Array.isArray(exam?.chunks) ? exam.chunks : []).flatMap((c) => unit.chunks.filter((u) => typeof c?.en === "string" && key(u) === key(c)));
+  const rest = shuffle(unit.chunks.filter((c) => !missed.some((m) => key(m) === key(c))));
+  const ordered = [...missed, ...rest.filter((c) => !recentTargets.has(key(c))), ...rest.filter((c) => recentTargets.has(key(c)))];
+  const items = unitShadowItems(ordered, unit.sound).slice(0, Math.max(UNIT_ROUND, Math.min(missed.length, UNIT_ROUND + 1)));
   return items.length > 0 ? items : null;
 }
 

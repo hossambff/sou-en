@@ -83,7 +83,7 @@ export function RetryScoreButton({ url, label = "Ask Hossam to listen now", auto
       </button>
       <p className="mt-2 text-center text-xs text-ink-soft" role="status">
         {state === "later" && "He's still resting. Your answers are safe, try again later 💛"}
-        {state === "deaf" && "His ears aren't connected yet (speech-to-text). Your answers are safe 💛"}
+        {state === "deaf" && "His ears (speech-to-text) aren't working right now. Your answers are safe, try again later 💛"}
       </p>
     </div>
   );

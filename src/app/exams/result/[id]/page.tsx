@@ -4,9 +4,11 @@ import { z } from "zod";
 import { requireLearner } from "@/lib/session";
 import { learnerTimeZone } from "@/lib/learner";
 import { getSound, getUnit, unitPosition } from "@/lib/curriculum";
-import { EXAM_PASS, examRetryAt, type ExamTask } from "@/lib/assessment/exam";
+import { hourIn, isNightHour } from "@/lib/time-of-day";
+import { EXAM_PASS, examRetryAt, unheardAnswer, type ExamTask } from "@/lib/assessment/exam";
 import { loadExam } from "@/lib/assessment/exam-server";
 import { ScoreRing } from "@/app/drill/drill-ui";
+import { unitShadowHref } from "@/app/drill/drill-data";
 import { SpeakButton } from "@/components/speak-button";
 import { Card, Shell, shortDay, whenLabel } from "../../_ui/badges";
 import { RetryScoreButton } from "../../_ui/retry-score";
@@ -41,6 +43,10 @@ export default async function ExamResultPage({ params }: PageProps<"/exams/resul
   const retryAt = scored && !exam.passed ? examRetryAt(exam.finished_at) : null;
   const feedback = exam.feedback;
   const grades = new Map((feedback?.grades ?? []).map((g) => [g.taskId, g]));
+  // Recordings nobody could hear (no speech-to-text): left out of the score, said kindly
+  const unheard = new Set(exam.answers.filter(unheardAnswer).map((a) => a.taskId));
+  // Shadow Me on this unit's phrases, the ones listed under "What to practise" first
+  const shadowHref = unit ? unitShadowHref(unit.id, exam.id, isNightHour(hourIn(new Date(), timeZone))) : "/drill/shadow";
 
   return (
     <Shell>
@@ -109,6 +115,16 @@ export default async function ExamResultPage({ params }: PageProps<"/exams/resul
               {retryAt ? ` You can try again at ${whenLabel(retryAt, timeZone)}.` : " You can try again now."}
             </p>
           </header>
+        )}
+
+        {scored && unheard.size > 0 && (
+          <p className="rounded-2xl bg-saffron-soft p-3 text-sm animate-rise" role="note">
+            🎧 Hossam couldn&apos;t hear {unheard.size === 1 ? "one of your recordings" : "some of your recordings"} (speech-to-text wasn&apos;t
+            working), so {unheard.size === 1 ? "it doesn't" : "they don't"} count either way. Your score comes from everything else 💛
+            <span className="ar mt-1 block text-ink-soft" dir="rtl">
+              حسام ما قدرش يسمع شي تسجيلات ديالك، داكشي علاش ما تحسباتش. النقطة ديالك جات من الباقي 💛
+            </span>
+          </p>
         )}
 
         {feedback?.message && (
@@ -180,7 +196,7 @@ export default async function ExamResultPage({ params }: PageProps<"/exams/resul
                 ))}
               </ul>
             )}
-            <Link href="/drill/shadow" className="mt-3 block rounded-2xl border border-line bg-card py-3 text-center text-sm font-medium">
+            <Link href={shadowHref} className="mt-3 block rounded-2xl border border-line bg-card py-3 text-center text-sm font-medium">
               Practise with Shadow Me 🦜
             </Link>
           </Card>
@@ -206,6 +222,7 @@ export default async function ExamResultPage({ params }: PageProps<"/exams/resul
                       <span className="min-w-0 flex-1">{label.text}</span>
                       <span className="shrink-0 tabular-nums text-ink-soft">{score === undefined ? "–" : score}</span>
                     </div>
+                    {unheard.has(task.id) && <p className="mt-1 text-xs text-ink-soft">🎧 Couldn&apos;t be heard, so it doesn&apos;t count 💛</p>}
                     {grade?.evidence && <p className="mt-1 text-xs text-ink-soft">“{grade.evidence}”</p>}
                     {grade?.tip && <p className="mt-1 text-xs">💡 {grade.tip}</p>}
                   </li>

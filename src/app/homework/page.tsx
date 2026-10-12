@@ -148,6 +148,7 @@ function OpenItem({ item, today, progress }: { item: HomeworkItem; today: string
         <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
           <span className="rounded-full bg-saffron-soft px-2 py-0.5">{due.en}</span>
           <span className="text-ink-soft">{info.label}</span>
+          {item.submission?.heardNothing && <span className="text-ink-soft">· record it again 💛</span>}
           {progress && progress.done > 0 && (
             <span className="text-ink-soft">
               · {Math.min(progress.done, progress.goal)} of {progress.goal} done

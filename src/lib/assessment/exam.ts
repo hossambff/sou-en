@@ -6,7 +6,7 @@ import type { Cefr, Chunk, SkillScores, SoundId, Unit } from "@/lib/curriculum/t
 import { SOUND_IDS } from "@/lib/curriculum/types";
 import { matchesAnswer } from "@/lib/scoring";
 import { getScenario } from "@/lib/scenarios";
-import { bandFor, blendSkills, englishWordCount, type PronunciationEngine } from "./placement";
+import { bandFor, blendSkills, englishWordCount, isUnheard, type PronunciationEngine } from "./placement";
 
 export const EXAM_COUNTS = { say: 4, repeat: 2, speak: 2 } as const;
 /** Pass mark (0–100). */
@@ -55,6 +55,11 @@ export type ExamAnswer =
       seconds: number;
       /** Server speech-to-text already ran on this clip (even if it heard nothing). */
       sttTried?: boolean;
+      /**
+       * Server-only: this recording can never be transcribed (no speech-to-text configured, the file was
+       * rejected, or it still failed a day later). Left out of the score instead of counting as silence.
+       */
+      unheard?: boolean;
     };
 
 /** Hossam's grade for one recorded answer (1–5 each). */
@@ -189,6 +194,11 @@ export function hasSpeech(answer: Extract<ExamAnswer, { kind: "speak" | "rolepla
   return Boolean(answer && englishWordCount(answer.transcript) > 0);
 }
 
+/** A recorded answer nobody could hear (see ExamAnswer.unheard): it counts neither for nor against her. */
+export function unheardAnswer(answer: ExamAnswer | undefined) {
+  return Boolean(answer && (answer.kind === "speak" || answer.kind === "roleplay") && isUnheard(answer));
+}
+
 /** Recorded answers that still need Hossam's ears (they have English words in them). */
 export function answersToGrade(tasks: readonly ExamTask[], answers: readonly ExamAnswer[]) {
   return tasks.flatMap((task) => {
@@ -213,7 +223,8 @@ export function examTotal(parts: Record<ExamPart, number | null>) {
 
 /**
  * Scores an exam. Say and repeat are scored right here; recorded answers need Hossam's grades
- * (`grades`) unless they are empty (an empty or skipped answer scores 0, nothing to grade).
+ * (`grades`) unless they are empty (an empty or skipped answer scores 0, nothing to grade). A recording
+ * that could never be heard (no speech-to-text) is left out, like a repeat that couldn't be measured.
  */
 export function scoreExam(tasks: readonly ExamTask[], answers: readonly ExamAnswer[], grades: readonly ExamGrade[] | null): ExamBreakdown {
   const perTask: Record<string, number> = {};
@@ -230,6 +241,8 @@ export function scoreExam(tasks: readonly ExamTask[], answers: readonly ExamAnsw
       // leave it out instead of counting a 0 she didn't earn
       if (answer?.kind === "repeat" && answer.score === null) continue;
       score = answer?.kind === "repeat" && typeof answer.score === "number" ? clamp(Math.round(answer.score), 0, 100) : 0;
+    } else if (unheardAnswer(answer)) {
+      continue;
     } else if (answer && (answer.kind === "speak" || answer.kind === "roleplay") && hasSpeech(answer)) {
       const grade = grades?.find((g) => g.taskId === task.id);
       if (grade) score = gradeScore(grade);

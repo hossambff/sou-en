@@ -11,6 +11,7 @@ import { QuickAsk } from "@/components/quick-ask";
 import { InstallHint } from "@/components/pwa/install-hint";
 import { HomeworkCard } from "@/components/homework-card";
 import { KIND_INFO, homeworkBoard, isVoiceKind } from "@/lib/homework";
+import { reviewDeadlineFromNow } from "@/app/api/homework/review";
 import { getAssessmentStatus } from "@/lib/assessment/status";
 import { moveOffPassedUnit } from "@/lib/assessment/exam-server";
 
@@ -25,6 +26,9 @@ function greetingEmoji(hour: number) {
 }
 
 export default async function HomePage() {
+  // The background homework review (HomeworkCard) must end within this page's maxDuration, which
+  // started with the request: its time is counted from here, not from when the page was sent
+  const reviewDeadline = reviewDeadlineFromNow();
   const { user } = await requireLearner();
   // If she's sitting on a unit she already passed (older data), move her on before anything reads it
   await moveOffPassedUnit(user.id).catch(() => null);
@@ -45,6 +49,8 @@ export default async function HomePage() {
     getAssessmentStatus(user.id).catch(() => null),
   ]);
   const nextHomework = homework?.open.find((item) => isVoiceKind(item.kind)) ?? null;
+  // An open shadow homework: Today's Shadow bite opens its phrases (only tries on them count)
+  const shadowHomework = homework?.open.find((item) => item.kind === "shadow") ?? null;
   const month = monthOfJourney(profile.started_on);
   const level = levelFor(dash.points);
   const babyAge = babyAgeLabel(profile.baby_birthdate);
@@ -90,10 +96,11 @@ export default async function HomePage() {
             homework: nextHomework
               ? { id: nextHomework.id, title: nextHomework.title, titleAr: nextHomework.title_ar, emoji: KIND_INFO[nextHomework.kind].emoji }
               : null,
+            shadowHomeworkId: shadowHomework?.id ?? null,
           }}
         />
 
-        <HomeworkCard board={homework} />
+        <HomeworkCard board={homework} reviewDeadline={reviewDeadline} />
 
         <QuickAsk />
 

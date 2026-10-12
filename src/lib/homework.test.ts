@@ -123,6 +123,16 @@ describe("planNewHomework", () => {
     expect(items[1].payload.chunks?.map((chunk) => chunk.en)).toEqual(["Chunk 0.", "Chunk 1.", "Chunk 2.", "Chunk 3.", "Chunk 4."]);
   });
 
+  it("a new shadow item counts only its own phrases, and says so (the button below and Today's plan open them)", () => {
+    const shadow = plan({ openKinds: ["speak"] })[0];
+    expect(shadow.kind).toBe("shadow");
+    expect(shadow.payload.chunkFilter).toBe(true);
+    expect(shadow.instructions).toContain("Open Shadow Me");
+    expect(shadow.instructions).toMatch(/these 5 phrases/);
+    expect(shadow.instructions).toMatch(/Tries on these phrases are the ones that count/);
+    expect(shadow.instructionsAr).toMatch(/[؀-ۿ]/);
+  });
+
   it("does nothing with 2 or more open, or once today's set was made", () => {
     expect(plan({ openKinds: ["speak", "shadow"] })).toEqual([]);
     expect(plan({ openKinds: ["speak", "speak", "mission"] })).toEqual([]);
@@ -206,9 +216,12 @@ describe("pickChunks", () => {
 describe("shadow homework drills its own unit phrases", () => {
   const ID = "6f1c2c6e-8f0a-4c43-9d36-3f1f6f7f9a10";
 
-  it("links Shadow Me to the item (night mode kept)", () => {
+  it("links Shadow Me to the item (night and whisper modes kept)", () => {
     expect(hw.shadowHomeworkHref(ID)).toBe(`/drill/shadow?homework=${ID}`);
     expect(hw.shadowHomeworkHref(ID, true)).toBe(`/drill/shadow?homework=${ID}&mode=night`);
+    expect(hw.shadowHomeworkHref(ID, false)).toBe(`/drill/shadow?homework=${ID}`);
+    expect(hw.shadowHomeworkHref(ID, "whisper")).toBe(`/drill/shadow?homework=${ID}&mode=whisper`);
+    expect(hw.shadowHomeworkHref(ID, "normal")).toBe(`/drill/shadow?homework=${ID}`);
   });
 
   it("reads the homework id from the request, else from the drill page that asked (Practice more)", () => {
@@ -260,6 +273,26 @@ describe("waiting reviews retry by themselves", () => {
     ];
     expect(hw.reviewsToRetry(waiting, now)).toEqual(["older", "old"]);
     expect(hw.reviewsToRetry([], now)).toEqual([]);
+  });
+
+  it("stops retrying a hand-in by itself once its review started 3 times", () => {
+    const item = (id: string, submission: Record<string, unknown> | null) => ({
+      id,
+      kind: "speak" as const,
+      status: "submitted" as const,
+      submitted_at: at(60),
+      submission: submission as never,
+    });
+    const waiting = [
+      item("never-tried", null),
+      item("twice", { transcript: "", clipId: null, seconds: 30, reviewAttempts: 2 }),
+      item("given-up", { transcript: "", clipId: null, seconds: 30, reviewAttempts: 3 }),
+      item("junk-count", { transcript: "", clipId: null, seconds: 30, reviewAttempts: "9" }),
+    ];
+    expect(hw.MAX_AUTO_REVIEWS).toBe(3);
+    expect(hw.reviewsToRetry(waiting, now)).toEqual(["never-tried", "twice", "junk-count"]);
+    expect(hw.reviewAttempts(null)).toBe(0);
+    expect(hw.reviewAttempts({ reviewAttempts: 4 })).toBe(4);
   });
 });
 
@@ -588,14 +621,16 @@ describe("database flows", () => {
     expect(JSON.parse(String(insert?.[1]?.[1])).map((row: { unit_id: string }) => row.unit_id)).toEqual(["b1-01", "b1-01"]);
   });
 
-  it("syncAutoHomework counts only tries on a shadow item's own phrases", async () => {
+  it("syncAutoHomework counts only tries on a new shadow item's own phrases", async () => {
     route([]);
     await hw.syncAutoHomework("u1");
     const [sql] = db.query.mock.calls.find(([text]) => text.includes("as attempts"))!;
     expect(sql).toContain("jsonb_array_elements(coalesce(h.chunks, '[]'::jsonb))");
     expect(sql).toContain("lower(regexp_replace(btrim(d.target), '\\s+', ' ', 'g'))");
-    // Old items without phrases (and words items) count every try, as before
+    // Items made before the filter (no chunkFilter marker), items without phrases and words items count
+    // every try, as before
     expect(sql).toContain("h.kind <> 'shadow'");
+    expect(sql).toContain("h.payload->'chunkFilter' is distinct from 'true'::jsonb");
     expect(sql).toContain("coalesce(jsonb_array_length(h.chunks), 0) = 0");
   });
 
@@ -627,17 +662,53 @@ describe("database flows", () => {
     expect(JSON.parse(String(params?.[2]))).toEqual({ transcript: "hello again", clipId: null, seconds: 41 });
   });
 
-  it("resetEmptySubmission re-opens an empty voice note and removes its points row, in one statement", async () => {
-    route([{ match: "with reset as", rows: { id: "h1" } }]);
-    expect(await hw.resetEmptySubmission("h1", "u1")).toBe(true);
+  it("resetEmptySubmission re-opens an empty voice note for today, in one statement", async () => {
+    route([{ match: "reset as (", rows: { id: "h1" } }]);
+    expect(await hw.resetEmptySubmission("h1", "u1", { today: TODAY })).toBe(true);
     const [sql, params] = db.queryOne.mock.calls[0];
-    expect(sql).toContain("set status = 'assigned', submitted_at = null, points = 0");
+    expect(sql).toContain("set status = 'assigned', submitted_at = null");
     expect(sql).toContain("status = 'submitted'");
-    expect(sql).toMatch(/delete from coach_session where id in \(select id from reset\) and user_id = \$2 and activity = 'homework'/);
+    // Her day moves up to today (never earlier), so it can't drop off as stale before she sees it
+    expect(sql).toContain("due_on = greatest(h.due_on, $4::date)");
+    // Points come back only for a note handed in within the last day; older ones keep theirs
+    expect(sql).toContain("submitted_at > now() - make_interval(hours => $5::int)");
+    expect(sql).toContain("points = case when old.fresh then 0 else h.points end");
+    expect(sql).toMatch(/delete from coach_session where id in \(select id from reset where fresh\) and user_id = \$2 and activity = 'homework'/);
     expect(params?.slice(0, 2)).toEqual(["h1", "u1"]);
     expect(JSON.parse(String(params?.[2]))).toEqual({ transcript: "", clipId: null, seconds: 0, heardNothing: true });
+    expect(params?.slice(3)).toEqual([TODAY, 24]);
     route([]);
-    expect(await hw.resetEmptySubmission("h1", "u1")).toBe(false);
+    expect(await hw.resetEmptySubmission("h1", "u1", { today: TODAY })).toBe(false);
+  });
+
+  it("resetEmptySubmission uses her own today, and remembers an unreadable recording", async () => {
+    route([
+      { match: "select timezone from learner_profile", rows: { timezone: "Africa/Casablanca" } },
+      { match: "reset as (", rows: { id: "h1" } },
+    ]);
+    expect(await hw.resetEmptySubmission("h1", "u1", { unreadable: true })).toBe(true);
+    const [, params] = db.queryOne.mock.calls.find(([text]) => text.includes("reset as ("))!;
+    expect(params?.[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(JSON.parse(String(params?.[2]))).toMatchObject({ heardNothing: true, unreadable: true });
+  });
+
+  it("an item she was just asked to record again doesn't drop off with her old unit", async () => {
+    route([]);
+    await hw.skipOtherUnitHomework("u1", "a1-02");
+    const [sql] = db.query.mock.calls[0];
+    expect(sql).toContain("not coalesce(submission->'heardNothing' = 'true'::jsonb, false)");
+  });
+
+  it("addTypedTranscript fills only a waiting note's empty transcript and frees the claim", async () => {
+    route([{ match: "jsonb_build_object('transcript'", rows: { id: "h1" } }]);
+    expect(await hw.addTypedTranscript("h1", "u1", "  I went   to the park.\n")).toBe(true);
+    const [sql, params] = db.queryOne.mock.calls[0];
+    expect(sql).toContain("status = 'submitted'");
+    expect(sql).toContain("coalesce(btrim(submission->>'transcript'), '') = ''");
+    expect(sql).toContain("review_started_at = null");
+    expect(params).toEqual(["h1", "u1", "I went to the park."]);
+    expect(await hw.addTypedTranscript("h1", "u1", "   ")).toBe(false);
+    expect(db.queryOne).toHaveBeenCalledTimes(1);
   });
 
   it("Today's plan treats a handed-in voice note and a unit exam as done today (not a drill homework)", async () => {

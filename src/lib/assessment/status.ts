@@ -16,10 +16,11 @@ export type AssessmentStatus = {
   nextUnit: Unit | undefined;
   /**
    * She has practised this unit enough (2+ sessions/drills since it started), isn't waiting out a retry,
-   * hasn't passed it, and has no exam for it still waiting for Hossam's grade.
+   * hasn't passed it, and has no exam for it still waiting for Hossam's grade (from the last
+   * PENDING_EXAM_HOLD_HOURS: an exam that stays ungraded longer never blocks the plan).
    */
   unitExamReady: boolean;
-  /** Her exam for the current unit that Hossam hasn't graded yet (null = none) */
+  /** Her recent exam for the current unit that Hossam hasn't graded yet (null = none; see unitExamReady) */
   unitExamPendingId: string | null;
   /** Practice sessions/drills since the current unit started (see PRACTICE_ACTIVITIES) */
   practiceCount: number;
