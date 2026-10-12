@@ -110,6 +110,8 @@ export class Speaker {
       const primer = new SpeechSynthesisUtterance(" ");
       primer.volume = 0;
       window.speechSynthesis.speak(primer);
+      // The voice list loads lazily (empty on the first call): ask now, so a fallback later finds an Arabic voice
+      window.speechSynthesis.getVoices();
     }
     // Web Audio (quiet modes) must also be started inside a tap on iOS
     if (this.volume < 1) this.quietAudio();
@@ -295,11 +297,13 @@ export class Speaker {
   private async playQuietly(blob: Blob, generation: number): Promise<boolean> {
     const context = this.quietAudio();
     if (!context) return false;
+    // Before the first sample: on silent, iOS only lets Web Audio out once the media element is really playing
+    const session = this.holdMediaSession();
     try {
       // resume() outside a tap may never settle on iOS: don't wait for it long
       if (context.state !== "running") await Promise.race([context.resume(), wait(400)]);
       if (context.state !== "running") return false;
-      const buffer = await context.decodeAudioData(await blob.arrayBuffer());
+      const [buffer] = await Promise.all([context.decodeAudioData(await blob.arrayBuffer()), session.started]);
       if (generation !== this.generation) return true;
 
       return await new Promise<boolean>((resolve) => {
@@ -309,7 +313,6 @@ export class Speaker {
         source.buffer = buffer;
         source.connect(gain);
         gain.connect(context.destination);
-        const releaseSession = this.holdMediaSession();
         let settled = false;
         let safety = 0;
         const done = () => {
@@ -322,7 +325,6 @@ export class Speaker {
           } catch {}
           source.disconnect();
           gain.disconnect();
-          releaseSession();
           if (this.cancelPlayback === done) this.cancelPlayback = null;
           resolve(true);
         };
@@ -334,24 +336,30 @@ export class Speaker {
       });
     } catch {
       return false;
+    } finally {
+      session.release();
     }
   }
 
   /**
    * iOS mutes Web Audio with the ring/silent switch unless a media element is playing, so while a quiet
    * clip plays, the unlocked <audio> element loops silence (this keeps iOS in its "playback" mode).
+   * `started` settles once the loop plays (or after a short wait, so a refused play() never blocks the clip).
    */
   private holdMediaSession() {
     const audio = this.audio;
-    if (!audio) return () => {};
+    if (!audio) return { started: Promise.resolve(), release: () => {} };
     const silence = this.silentUrl();
     audio.loop = true;
     audio.src = silence;
-    audio.play().catch(() => {});
-    return () => {
-      if (audio.getAttribute("src") !== silence) return;
-      audio.pause();
-      audio.loop = false;
+    const started = Promise.race([audio.play().catch(() => {}), wait(300)]);
+    return {
+      started,
+      release: () => {
+        if (audio.getAttribute("src") !== silence) return;
+        audio.pause();
+        audio.loop = false;
+      },
     };
   }
 

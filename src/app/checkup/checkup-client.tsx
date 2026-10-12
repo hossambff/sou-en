@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Speaker } from "@/lib/voice/speaker";
+import { micProblem } from "@/lib/voice/listener";
 import { useScreenWake } from "@/lib/screen-wake";
 import { CHECKUP_MAX_SECONDS, CHECKUP_PROMPTS, type CheckupPromptId } from "@/lib/progress";
 import { newRunId } from "@/app/drill/drill-ui";
@@ -105,6 +106,8 @@ export function CheckupClient(props: {
   const meter = useRef<number>(0);
   const askToken = useRef(0);
   const starting = useRef(false);
+  /** False once she left the page: a mic that opens late is closed straight away */
+  const alive = useRef(true);
   /** One id per check-up: "Try again" after a timeout re-sends it, so the server never saves it twice */
   const checkupId = useRef<string | null>(null);
 
@@ -113,6 +116,13 @@ export function CheckupClient(props: {
 
   // Hands-free (baby in arms): keep the screen on while Hossam asks, she answers, and he listens
   useScreenWake(phase === "asking" || phase === "ready" || phase === "recording" || phase === "sending");
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   useEffect(
     () => () => {
@@ -133,6 +143,7 @@ export function CheckupClient(props: {
 
   async function ask(i: number) {
     const token = ++askToken.current;
+    setError(null);
     setPhase("asking");
     const s = speaker.current!;
     s.stop();
@@ -143,37 +154,53 @@ export function CheckupClient(props: {
     if (token === askToken.current) setPhase((current) => (current === "asking" ? "ready" : current));
   }
 
-  async function begin(startAt = index) {
-    // A double tap on "I'm ready" must not open two mic streams (the first would never be stopped)
-    if (starting.current) return;
-    starting.current = true;
+  /** Lets go of the mic. While it's open, iOS plays Hossam's questions and her take like a phone call (quiet). */
+  function closeMic() {
+    stream.current?.getTracks().forEach((track) => track.stop());
+    stream.current = null;
+    void context.current?.close().catch(() => {});
+    context.current = null;
+    analyser.current = null;
+  }
+
+  /**
+   * Opens the mic and its level meter (call inside a tap). A stream whose track ended (a phone call took the mic,
+   * iOS stopped it while the app was in the background) can't record any more: it's replaced. Throws if it can't open.
+   */
+  async function openMic(): Promise<MediaStream> {
+    const current = stream.current;
+    if (current && current.getAudioTracks().some((track) => track.readyState === "live")) return current;
+    closeMic();
+    const fresh = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    if (!alive.current) {
+      fresh.getTracks().forEach((track) => track.stop());
+      throw new Error("She left the check-up");
+    }
+    stream.current = fresh;
+    const audio = new AudioContext();
+    context.current = audio;
+    const source = audio.createMediaStreamSource(fresh);
+    analyser.current = audio.createAnalyser();
+    analyser.current.fftSize = 1024;
+    source.connect(analyser.current);
+    await audio.resume().catch(() => {});
+    return fresh;
+  }
+
+  function micError(error: unknown) {
+    return micProblem(error) === "busy"
+      ? "The microphone is busy (a call or another app is using it). Finish that, then try again."
+      : "Hossam can't hear you yet. Please allow the microphone for this app, then try again.";
+  }
+
+  function begin(startAt = index) {
     setError(null);
     speaker.current ??= new Speaker(props.serverVoice, true);
     speaker.current.rate = props.speechRate;
     speaker.current.unlock();
-    try {
-      if (!stream.current) {
-        const fresh = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        });
-        if (stream.current) fresh.getTracks().forEach((track) => track.stop());
-        else stream.current = fresh;
-      }
-      if (!context.current) {
-        context.current = new AudioContext();
-        const source = context.current.createMediaStreamSource(stream.current);
-        analyser.current = context.current.createAnalyser();
-        analyser.current.fftSize = 1024;
-        source.connect(analyser.current);
-      }
-      await context.current.resume();
-    } catch {
-      setError("Hossam can't hear you yet. Please allow the microphone for this app, then try again.");
-      setPhase("error");
-      return;
-    } finally {
-      starting.current = false;
-    }
+    // The mic opens when she taps to answer (iOS asks for it then): Hossam asks with it closed
     void ask(startAt);
   }
 
@@ -181,15 +208,30 @@ export function CheckupClient(props: {
     void ask(index);
   }
 
-  function startRecording() {
+  async function startRecording() {
+    if (starting.current) return; // a double tap must not start two recordings
     askToken.current++;
     speaker.current?.stop();
-    if (!stream.current) return;
+    setError(null);
+    starting.current = true;
+    let mic: MediaStream;
+    try {
+      mic = await openMic();
+    } catch (error) {
+      if (!alive.current) return;
+      // Said under the mic button: her answers so far stay, and a tap tries again
+      setError(micError(error));
+      setPhase("ready");
+      return;
+    } finally {
+      starting.current = false;
+    }
     const mimeType = pickMime();
     let rec: MediaRecorder;
     try {
-      rec = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
+      rec = new MediaRecorder(mic, mimeType ? { mimeType } : undefined);
     } catch {
+      closeMic();
       setError("This browser can't record audio. Try opening Sou Coach in Safari or Chrome.");
       setPhase("error");
       return;
@@ -209,6 +251,7 @@ export function CheckupClient(props: {
       const blob = new Blob(chunks, { type: rec.mimeType || mimeType || "audio/webm" });
       // Give the browser recogniser a moment to deliver its last words
       window.setTimeout(() => {
+        closeMic(); // she listens back (and Hossam asks the next one) at full volume
         const transcript = heard.trim();
         setTake({ blob, url: URL.createObjectURL(blob), seconds, transcript });
         setTyped(transcript);
@@ -239,7 +282,18 @@ export function CheckupClient(props: {
       }
     }
 
-    rec.start(250);
+    try {
+      rec.start(250);
+    } catch {
+      // The mic died between opening and now: never leave the button dead (the next tap opens a fresh one)
+      rec.onstop = null;
+      recognition.current?.abort();
+      recognition.current = null;
+      closeMic();
+      setError("The microphone stopped. Tap to try again.");
+      setPhase("ready");
+      return;
+    }
     recorder.current = rec;
     setElapsed(0);
     setPhase("recording");
@@ -531,6 +585,11 @@ export function CheckupClient(props: {
             <p className="ar text-sm text-ink-soft" dir="rtl">
               ضغطي وجاوبي، عندك دقيقة
             </p>
+            {error && (
+              <p role="status" className="mt-2 max-w-xs text-center text-sm text-terra">
+                {error}
+              </p>
+            )}
             <button onClick={() => next(true)} className="mt-4 min-h-11 px-4 text-sm text-ink-soft underline-offset-4 hover:underline">
               {isLast && kept.length ? "Skip this one and finish" : "Skip this question"}
             </button>

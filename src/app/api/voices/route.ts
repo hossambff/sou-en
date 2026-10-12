@@ -25,7 +25,7 @@ export async function GET() {
   return Response.json(
     {
       voices,
-      browser: { id: BROWSER_VOICE_ID, name: "Phone voice", tagline: "Free, works offline. Less natural, and weak at Darija." },
+      browser: { id: BROWSER_VOICE_ID, name: "Phone voice", tagline: "Free, works offline. Less natural, weak at Darija, and silent on an iPhone in silent mode." },
       current: settings?.voice_id ?? null,
       defaultVoiceId: defaultVoiceId(),
       serverVoice: serverVoiceConfigured(),

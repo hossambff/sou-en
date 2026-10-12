@@ -225,6 +225,8 @@ function fakeBatch(result: ListenResult = { kind: "heard", text: "from batch", s
     cancel: vi.fn(),
     finish: vi.fn(),
     dispose: vi.fn(),
+    releaseMic: vi.fn(),
+    micOpen: true,
   };
   return batch as typeof batch & BatchListener;
 }
@@ -624,6 +626,32 @@ describe("RealtimeListener", () => {
     expect(batch.hear).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(61_000);
     expect(listener.live).toBe(true);
+  });
+
+  it("iOS drops the socket because she left the app: her turn is rescued, and live listening doesn't rest", async () => {
+    const { listener, deps, sockets, captures, ticks } = setup();
+    vi.stubGlobal("document", { visibilityState: "hidden" });
+    const heard = listener.hear({ whisper: false });
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0].open();
+    await ticks(captures[0], 0.2, 10);
+    listener.finish(); // the screen keeps what she said when the app goes to the background
+    sockets[0].drop();
+    await ticks(captures[0], 0, 4);
+    expect(await heard).toMatchObject({ kind: "heard", text: "rescued words" });
+    expect(deps.transcribe).toHaveBeenCalledTimes(1);
+    expect(listener.live).toBe(true);
+  });
+
+  it("releaseMic() ends the live turn and closes the batch Listener's mic", async () => {
+    const { listener, captures, sockets, batch } = setup();
+    const heard = listener.hear({ whisper: false });
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0].open();
+    listener.releaseMic();
+    expect(await heard).toEqual({ kind: "silence" });
+    expect(captures[0].stopped).toBe(true);
+    expect(batch.releaseMic).toHaveBeenCalledTimes(1);
   });
 
   it("a failed rescue upload reports the failure like the Listener", async () => {

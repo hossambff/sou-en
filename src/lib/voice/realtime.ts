@@ -193,6 +193,9 @@ export type RealtimeDeps = {
 
 const timeoutSignal = (ms: number) => (typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined);
 
+/** The app is in the background (or the phone locked): iOS closes its sockets, which says nothing about the service. */
+const pageHidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
+
 const BROWSER_DEPS: RealtimeDeps = {
   async fetchToken() {
     try {
@@ -225,7 +228,7 @@ const BROWSER_DEPS: RealtimeDeps = {
 /** What RealtimeListener needs from the batch Listener (which also owns the mic). */
 export type BatchListener = Pick<
   Listener,
-  "init" | "hear" | "cancel" | "finish" | "dispose" | "usingServerStt" | "audioContext" | "mediaStream"
+  "init" | "hear" | "cancel" | "finish" | "dispose" | "releaseMic" | "micOpen" | "usingServerStt" | "audioContext" | "mediaStream"
 >;
 
 export class RealtimeListener {
@@ -253,6 +256,11 @@ export class RealtimeListener {
   /** True while transcription goes through the server (false after falling back to the phone). */
   get usingServerStt() {
     return this.batch.usingServerStt;
+  }
+
+  /** True while the mic is open. */
+  get micOpen() {
+    return this.batch.micOpen;
   }
 
   /** True when the next turn will be transcribed live. */
@@ -293,6 +301,12 @@ export class RealtimeListener {
     this.cancel();
     this.batch.dispose();
     this.token = null;
+  }
+
+  /** Lets go of the mic between turns, so Hossam doesn't sound like a phone call (see Listener.releaseMic). */
+  releaseMic() {
+    this.cancel();
+    this.batch.releaseMic();
   }
 
   /** What she said, silence, or a failure the screen should explain. Never throws. */
@@ -566,7 +580,8 @@ export class RealtimeListener {
       /** The socket can't carry this turn any more. `kind` (the error) decides how long live listening rests. */
       const fail = (kind: string | null) => {
         if (mode === "done" || mode === "rescue") return;
-        if (kind) this.noteFailure(kind);
+        // A socket iOS dropped because she left the app isn't a failing service: live listening doesn't rest for it
+        if (kind && !((kind === "closed" || kind === "socket") && pageHidden())) this.noteFailure(kind);
         closeSocket();
         if (!spoke) return delegate();
         if (mode === "committing" || !gate.speaking) return void upload();

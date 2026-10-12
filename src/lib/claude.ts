@@ -24,7 +24,13 @@ let client: Anthropic | null = null;
 /** Lazily created so builds and pages that never call Claude don't need the key. */
 export function claude() {
   if (!process.env.ANTHROPIC_API_KEY) throw new ClaudeUnavailableError("ANTHROPIC_API_KEY is not set");
-  client ??= new Anthropic({ maxRetries: 2, timeout: 60_000 });
+  // A user-scoped key (sk-ant-usr-…) isn't tied to a workspace: every request must name one
+  const workspace = process.env.ANTHROPIC_WORKSPACE_ID;
+  client ??= new Anthropic({
+    maxRetries: 2,
+    timeout: 60_000,
+    ...(workspace ? { defaultHeaders: { "anthropic-workspace-id": workspace } } : {}),
+  });
   return client;
 }
 

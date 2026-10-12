@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Speaker, takeSentences } from "@/lib/voice/speaker";
-import type { ListenFailureReason, ListenResult } from "@/lib/voice/listener";
+import { micProblem, type ListenFailureReason, type ListenResult } from "@/lib/voice/listener";
 import { RealtimeListener } from "@/lib/voice/realtime";
 import { COMMAND_TOAST, detectCommand, type VoiceCommandKind } from "@/lib/voice/commands";
 import { ACTIVITY_INFO, type Activity } from "@/lib/scenarios";
@@ -83,6 +83,15 @@ const CLOCK_PHASES = new Set<Phase>(["thinking", "speaking", "listening", "heari
 const SCREEN_MAY_SLEEP = new Set<Phase>(["ready", "paused", "idle", "error", "wrapped", "ending"]);
 /** The prompt tells Hossam to wrap up in the last 30 seconds; the app follows the same line. */
 const WRAP_UP_SECONDS = 30;
+/**
+ * While the mic is open, iOS plays everything like a phone call (quieter, at times from the earpiece, AirPods in
+ * call quality), so the mic rests while Hossam answers and opens again for her turn. iOS asks for the mic again
+ * when a page reopens it more than a minute after closing it without a tap: if Hossam is still busy after this
+ * long (a long story), the mic opens again before that can happen.
+ */
+const MIC_REST_MS = 45_000;
+/** Phases that lead to her turn without a tap (so the mic must be ready without a permission prompt). */
+const LISTEN_FOLLOWS = new Set<Phase>(["cheer", "thinking", "speaking"]);
 
 const READY_HINT: Record<Activity, string> = {
   chat: "Just chat with Hossam about your day.",
@@ -102,6 +111,18 @@ const LISTEN_PROBLEM: Record<ListenFailureReason, Message> = {
   service: { en: "I can't hear you right now. Tap and say it again.", ar: "ما قدرتش نسمعك دابا، ضغطي وعاودي", action: "listen" },
   network: { en: "I couldn't hear that, the connection is weak. Tap and say it again.", ar: "الكونيكسيون ضعيفة، ضغطي وعاودي", action: "listen" },
   mic: { en: "The microphone stopped. Tap to turn it back on.", ar: "الميكرو تقطع، ضغطي باش نرجعوه", action: "listen" },
+};
+
+/** The mic didn't open at the start: refused in the settings, or busy (a call, a voice note, another app). */
+const MIC_BLOCKED: Notice = {
+  title: "I need the microphone to hear you 🎙️",
+  en: "Please allow the microphone for this site in your browser settings, then tap start again.",
+  ar: "خليني نسمعك: سمحي للميكرو ف الإعدادات ديال المتصفح، ومن بعد ضغطي مرة أخرى.",
+};
+const MIC_BUSY: Notice = {
+  title: "The microphone is busy 🎙️",
+  en: "A call or another app is using the microphone. Finish it, then tap start again.",
+  ar: "شي مكالمة ولا تطبيق آخر خدام بالميكرو. ساليه، ومن بعد ضغطي مرة أخرى.",
 };
 
 /** Gentle notes shown while waiting for her (idle). */
@@ -208,6 +229,9 @@ export function SessionClient(props: {
   const finishing = useRef(false);
   const stopCheer = useRef<(() => void) | null>(null);
   const toastTimer = useRef(0);
+  /** Opens the resting mic again before iOS would ask for it (see MIC_REST_MS), counted from when it closed. */
+  const micRest = useRef(0);
+  const micRestedAt = useRef(0);
   /** The session was closed in the background (app closed / left); a page restored from cache shows the recap. */
   const endedInBackground = useRef(false);
   const reducedMotion = usePrefersReducedMotion();
@@ -240,11 +264,14 @@ export function SessionClient(props: {
     return () => clearInterval(id);
   }, []);
 
-  // App sent to the background mid-listen: stop listening and wait for her. Back in front: screen stays on again.
+  // App sent to the background (or the phone locked) mid-listen: what she already said goes on to Hossam; if she
+  // hadn't started, stop listening and wait for her (iOS stops the mic in the background anyway). Back in front:
+  // the screen stays on again.
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
-        if (phaseRef.current === "listening" || phaseRef.current === "hearing") listener.current?.cancel(); // → idle
+        if (phaseRef.current === "hearing") listener.current?.finish();
+        else if (phaseRef.current === "listening") listener.current?.cancel(); // → idle
       } else {
         wake.restore();
       }
@@ -291,9 +318,41 @@ export function SessionClient(props: {
       stopCheer.current?.();
       wake.allowOff();
       window.clearTimeout(toastTimer.current);
+      window.clearTimeout(micRest.current);
     },
     [wake],
   );
+
+  /** Closes the mic while Hossam talks or she's away; reopens it in time if a long answer leads to her turn. */
+  function restMic() {
+    window.clearTimeout(micRest.current);
+    const mic = listener.current;
+    if (!mic) return;
+    if (mic.micOpen) micRestedAt.current = Date.now();
+    mic.releaseMic();
+    const left = MIC_REST_MS - (Date.now() - micRestedAt.current);
+    if (left <= 0) return; // closed long ago: her next tap opens it
+    micRest.current = window.setTimeout(() => {
+      if (listener.current !== mic || finishing.current || document.visibilityState !== "visible") return;
+      if (LISTEN_FOLLOWS.has(phaseRef.current)) void mic.init().catch(() => {});
+    }, left);
+  }
+
+  /**
+   * Inside a tap that leads to Hossam talking and then her turn: rests the mic while he talks. If it has been
+   * closed a while (her turn would bring a permission prompt), it opens inside this tap first.
+   */
+  function primeMic() {
+    const mic = listener.current;
+    if (!mic) return;
+    if (mic.micOpen || Date.now() - micRestedAt.current < MIC_REST_MS) return restMic();
+    void mic.init().then(
+      () => {
+        if (listener.current === mic && LISTEN_FOLLOWS.has(phaseRef.current)) restMic();
+      },
+      () => {}, // her turn will say what's wrong with the mic
+    );
+  }
 
   function patchLine(id: number, patch: Partial<Line>) {
     setLines((current) => current.map((line) => (line.id === id ? { ...line, ...patch } : line)));
@@ -326,8 +385,13 @@ export function SessionClient(props: {
 
   async function listenTurn() {
     const myTurn = ++turn.current;
-    go("listening");
     const mic = listener.current;
+    // The mic rests while Hossam talks: "your turn" shows once it's open again (iOS takes a moment, more with AirPods)
+    if (mic && !mic.micOpen) {
+      await mic.init().catch(() => {}); // a mic that won't open is reported by hear() below
+      if (myTurn !== turn.current) return;
+    }
+    go("listening");
     const micFailed: ListenResult = { kind: "failed", reason: "mic", status: 0, switchedToPhone: false };
     const result = mic
       ? await mic
@@ -347,6 +411,7 @@ export function SessionClient(props: {
           .catch(() => micFailed)
       : micFailed;
     if (myTurn !== turn.current) return settleLive(myTurn, null);
+    restMic(); // her turn is over: Hossam answers with the mic closed
     if (result.kind !== "heard") settleLive(myTurn, null);
     if (mic && !mic.usingServerStt) setSttServer(false); // show the Darija/English picker for the phone's recognition
 
@@ -569,18 +634,15 @@ export function SessionClient(props: {
     const myStart = ++turn.current;
 
     try {
-      await listener.current.init();
-    } catch {
+      await listener.current.init(); // asks for the mic inside this tap
+    } catch (error) {
       listener.current?.dispose();
       listener.current = null;
-      setNotice({
-        title: "I need the microphone to hear you 🎙️",
-        en: "Please allow the microphone for this site in your browser settings, then tap start again.",
-        ar: "خليني نسمعك: سمحي للميكرو ف الإعدادات ديال المتصفح، ومن بعد ضغطي مرة أخرى.",
-      });
+      setNotice(micProblem(error) === "busy" ? MIC_BUSY : MIC_BLOCKED);
       return go("ready");
     }
     if (myStart !== turn.current) return;
+    restMic(); // allowed: it rests while the cheer and Hossam's hello play
 
     if (!sessionRef.current) {
       try {
@@ -635,6 +697,7 @@ export function SessionClient(props: {
         if (!sessionRef.current || !listener.current) return void start();
         speaker.current?.unlock();
         if (problem?.action === "listen") return void listenTurn();
+        primeMic();
         return void coachTurn(lastRequest.current ?? { event: "start" }, Boolean(lastRequest.current));
     }
   }
@@ -643,7 +706,7 @@ export function SessionClient(props: {
     turn.current++;
     abort.current?.abort();
     speaker.current?.stop();
-    listener.current?.cancel();
+    restMic(); // no mic while she's away
     stopCheer.current?.();
     setCheer(null);
     go("paused");
@@ -651,12 +714,16 @@ export function SessionClient(props: {
 
   function resume() {
     speaker.current?.unlock();
+    primeMic();
     // Paused before Hossam even said hello? Then this is the real start.
     void coachTurn({ event: lastRequest.current ? "resume" : "start" });
   }
 
-  /** Says Hossam's last line again (Repeat button, "repeat"/"عاود"/"slower" voice commands). */
-  function repeatLast() {
+  /**
+   * Says Hossam's last line again (Repeat button, "repeat"/"عاود"/"slower" voice commands).
+   * @param tapped from the button: a tap may open the mic for her coming turn
+   */
+  function repeatLast(tapped = false) {
     if (!speaker.current) return;
     const last = lastCoachLine.current;
     turn.current++;
@@ -665,6 +732,8 @@ export function SessionClient(props: {
     if (!last) return void listenTurn();
     takeSentences(last, true).sentences.forEach((sentence) => speaker.current!.enqueue(sentence));
     go("speaking");
+    if (tapped) primeMic();
+    else restMic();
     const myTurn = turn.current;
     void speaker.current.drained().then(() => {
       if (myTurn === turn.current) void listenTurn();
@@ -683,6 +752,7 @@ export function SessionClient(props: {
     turn.current++;
     abort.current?.abort();
     speaker.current?.stop();
+    window.clearTimeout(micRest.current);
     listener.current?.dispose();
     stopCheer.current?.();
     wake.allowOff();
@@ -778,7 +848,7 @@ export function SessionClient(props: {
             phase === "thinking" || phase === "transcribing" || phase === "ending" || phase === "paused" || phase === "wrapped" || resting
           }
           className={`relative grid place-items-center rounded-full outline-none transition-[width,height] focus-visible:ring-4 focus-visible:ring-terra-soft ${
-            compact ? "size-44" : "size-56"
+            compact ? "size-44 short:size-36" : "size-56 short:size-44"
           }`}
           aria-label={label.en}
         >
@@ -792,7 +862,7 @@ export function SessionClient(props: {
           />
           <span
             className={`relative grid place-items-center rounded-full shadow-card transition-[background,transform] duration-200 ${
-              compact ? "size-32" : "size-40"
+              compact ? "size-32 short:size-24" : "size-40 short:size-32"
             } ${
               active
                 ? "bg-gradient-to-br from-mint to-[color-mix(in_oklab,var(--mint),black_20%)]"
@@ -808,7 +878,7 @@ export function SessionClient(props: {
           </span>
         </button>
 
-        <p className={`${compact ? "mt-4" : "mt-6"} text-center font-medium`} aria-live="polite">
+        <p className={`${compact ? "mt-4 short:mt-3" : "mt-6 short:mt-4"} text-center font-medium`} aria-live="polite">
           {phase === "error" && problem ? problem.en : label.en}
         </p>
         <p className="ar text-center text-sm text-ink-soft" dir="rtl">
@@ -860,7 +930,7 @@ export function SessionClient(props: {
         )}
 
         {caption && !showTranscript && phase !== "ready" && phase !== "cheer" && (
-          <div className="mt-6 max-h-40 w-full overflow-y-auto rounded-3xl bg-card/80 px-5 py-4 text-center text-[17px] leading-relaxed shadow-card backdrop-blur">
+          <div className="mt-6 max-h-40 w-full overflow-y-auto rounded-3xl short:mt-4 short:max-h-28 bg-card/80 px-5 py-4 text-center text-[17px] leading-relaxed shadow-card backdrop-blur">
             <MixedText text={caption} />
           </div>
         )}
@@ -873,7 +943,7 @@ export function SessionClient(props: {
               const list = event.currentTarget;
               stickToEnd.current = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
             }}
-            className="mt-5 max-h-[40dvh] w-full space-y-2 overflow-y-auto overscroll-contain pb-1"
+            className="mt-5 max-h-[40dvh] w-full space-y-2 overflow-y-auto overscroll-contain pb-1 short:mt-4 short:max-h-[30dvh]"
           >
             {visibleLines.map((line) => (
               <li
@@ -941,7 +1011,7 @@ export function SessionClient(props: {
                 👶 Baby! <span className="ar text-base font-normal">· البيبي</span>
               </button>
               <button
-                onClick={repeatLast}
+                onClick={() => repeatLast(true)}
                 disabled={phase === "thinking" || phase === "transcribing" || phase === "cheer" || !hasCoachLine}
                 className="rounded-3xl border border-line bg-card px-5 text-sm font-medium shadow-card active:scale-[0.98] disabled:opacity-50 motion-reduce:active:scale-100"
                 aria-label="Repeat what Hossam said"

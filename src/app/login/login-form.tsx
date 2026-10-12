@@ -70,8 +70,23 @@ export function LoginForm({ resetEnabled = false }: { resetEnabled?: boolean }) 
           </bdi>
         </p>
       )}
-      {mode === "signup" && <input name="name" placeholder="Your first name" autoComplete="given-name" required className={input} />}
-      <input name="email" type="email" placeholder="Email" autoComplete="email" required className={input} />
+      {mode === "signup" && (
+        <input name="name" placeholder="Your first name" autoComplete="given-name" autoCapitalize="words" required className={input} />
+      )}
+      {/* No auto-capital or autocorrect: iOS would turn "sou@…" into "Sou@…" */}
+      <input
+        name="email"
+        type="email"
+        inputMode="email"
+        placeholder="Email"
+        autoComplete={mode === "forgot" ? "email" : "username"}
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        enterKeyHint={mode === "forgot" ? "send" : undefined}
+        required
+        className={input}
+      />
       {mode !== "forgot" && (
         <input
           name="password"

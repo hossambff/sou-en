@@ -144,7 +144,7 @@ export function DrillOrb({
       onClick={onTap}
       disabled={disabled}
       aria-label={label}
-      className="relative grid size-40 shrink-0 place-items-center rounded-full outline-none focus-visible:ring-4 focus-visible:ring-terra-soft disabled:cursor-default"
+      className="relative grid size-40 shrink-0 place-items-center rounded-full outline-none short:size-32 focus-visible:ring-4 focus-visible:ring-terra-soft disabled:cursor-default"
     >
       {(state === "speaking" || state === "ready") && <span className="absolute inset-3 rounded-full bg-terra/20 animate-ripple" />}
       <span
@@ -153,7 +153,7 @@ export function DrillOrb({
         } ${state === "busy" ? "animate-spin-slow" : ""}`}
       />
       <span
-        className={`relative grid size-28 place-items-center rounded-full shadow-card transition-[background,transform] duration-200 ${
+        className={`relative grid size-28 place-items-center rounded-full shadow-card transition-[background,transform] duration-200 short:size-24 ${
           active
             ? "bg-gradient-to-br from-mint to-[color-mix(in_oklab,var(--mint),black_20%)]"
             : state === "paused"

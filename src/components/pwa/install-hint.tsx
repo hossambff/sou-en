@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from "react";
 import {
   currentPlatform,
   getInstallPrompt,
-  isInAppBrowser,
+  iosBrowser,
   isStandalone,
   promptInstall,
   subscribeInstallPrompt,
@@ -79,7 +79,7 @@ export function InstallHint({ placement = "home", audience = "learner", classNam
   const hydrated = useSyncExternalStore(noop, () => true, () => false);
   const standalone = useSyncExternalStore(subscribeStandalone, isStandalone, () => false);
   const platform = useSyncExternalStore(noop, currentPlatform, () => "desktop" as const);
-  const inApp = useSyncExternalStore(noop, () => isInAppBrowser(navigator.userAgent), () => false);
+  const browser = useSyncExternalStore(noop, () => iosBrowser(navigator.userAgent), () => "safari" as const);
   const installEvent = useSyncExternalStore(subscribeInstallPrompt, getInstallPrompt, () => null);
   const justInstalled = useSyncExternalStore(subscribeInstallPrompt, wasJustInstalled, () => false);
   const dismissed = useSyncExternalStore(subscribeDismissed, readDismissed, () => true);
@@ -151,7 +151,7 @@ export function InstallHint({ placement = "home", audience = "learner", classNam
   }
 
   if (platform === "ios") {
-    if (inApp) {
+    if (browser === "in-app") {
       return (
         <Shell className={className}>
           {header}
@@ -166,7 +166,15 @@ export function InstallHint({ placement = "home", audience = "learner", classNam
         {header}
         <ol className="mt-3 space-y-2">
           <Step n={1} icon={<ShareIcon />} ar={copy.steps[0]}>
-            Tap <b>Share</b> in Safari
+            {browser === "safari" ? (
+              <>
+                Tap <b>Share</b> in Safari (no Share button? Tap <b>⋯</b> first)
+              </>
+            ) : (
+              <>
+                Tap <b>Share</b>, next to the address bar or in the <b>⋯</b> menu. Easiest in Safari.
+              </>
+            )}
           </Step>
           <Step n={2} icon={<AddIcon />} ar={copy.steps[1]}>
             Scroll down, choose <b>Add to Home Screen</b>

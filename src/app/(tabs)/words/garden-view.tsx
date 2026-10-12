@@ -104,7 +104,7 @@ export function GardenView({ items: allItems }: { items: GardenItem[] }) {
               role="radio"
               aria-checked={filter === option.value}
               onClick={() => setFilter(option.value)}
-              className={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-sm font-medium transition motion-safe:active:scale-95 ${
+              className={`flex min-h-11 shrink-0 items-center gap-1.5 rounded-full px-4 text-sm font-medium transition motion-safe:active:scale-95 ${
                 filter === option.value ? "bg-ink text-bg" : "border border-line bg-card text-ink"
               }`}
             >

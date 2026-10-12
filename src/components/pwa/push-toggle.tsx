@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { currentPlatform, isStandalone } from "./platform";
+import { currentPlatform, isStandalone, pushAvailability } from "./platform";
 import { currentSubscription, forgetOnServer, saveOnServer } from "./push-device";
 import { ensureServiceWorker, pushSupported, urlBase64ToUint8Array } from "./service-worker";
 
@@ -12,7 +12,9 @@ const VAPID_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? "";
 
 async function detectState(): Promise<State> {
   if (!VAPID_KEY) return "unconfigured";
-  if (!pushSupported()) return currentPlatform() === "ios" && !isStandalone() ? "needs-install" : "unsupported";
+  // Checked before the permission: an iPhone browser tab can't get push at all, so "blocked" would mislead
+  const availability = pushAvailability(currentPlatform(), isStandalone(), pushSupported());
+  if (availability !== "ok") return availability;
   if (Notification.permission === "denied") return "denied";
   if (Notification.permission !== "granted") return "off";
   const subscription = await currentSubscription();
@@ -110,7 +112,8 @@ export function PushToggle({ audience }: Props) {
     {
       loading: "Checking…",
       unsupported: "This browser can't show notifications.",
-      "needs-install": "On iPhone, add the app to your home screen first (see below), then open it from there.",
+      "needs-install":
+        "On iPhone, notifications only work in the app on your Home Screen: in Safari tap Share, then Add to Home Screen, and open Sou Coach from there.",
       unconfigured: "Notifications aren't set up on the server yet.",
       denied: "Notifications are blocked. Allow them for Sou Coach in your phone's settings, then come back.",
       off: audience === "learner" ? "Off on this phone. Hossam can't nudge you yet." : "Off on this phone.",

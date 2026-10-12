@@ -15,6 +15,24 @@ export function isInAppBrowser(userAgent: string) {
   return /FBAN|FBAV|Instagram|Line\/|Snapchat|TikTok/i.test(userAgent);
 }
 
+/**
+ * Where "Add to Home Screen" lives on an iPhone: Safari's Share sheet; since iOS 16.4 also the Share sheet of
+ * Chrome, Edge, Firefox and co. In-app browsers and app web views (no "Safari/" token) have none: open Safari first.
+ */
+export type IosBrowser = "safari" | "other-browser" | "in-app";
+
+export function iosBrowser(userAgent: string): IosBrowser {
+  if (isInAppBrowser(userAgent) || /GSA\//.test(userAgent)) return "in-app";
+  if (/CriOS|EdgiOS|FxiOS|OPiOS|OPT\/|Ddg\/|DuckDuckGo|YaBrowser/.test(userAgent)) return "other-browser";
+  return /Safari\//.test(userAgent) ? "safari" : "in-app";
+}
+
+/** iPhone/iPad web push only exists in the Home Screen app (iOS 16.4+), never in a browser tab, whatever the tab reports. */
+export function pushAvailability(platform: Platform, standalone: boolean, supported: boolean) {
+  if (platform === "ios" && !standalone) return "needs-install" as const;
+  return supported ? ("ok" as const) : ("unsupported" as const);
+}
+
 export function currentPlatform(): Platform {
   if (typeof navigator === "undefined") return "desktop";
   return detectPlatform(navigator.userAgent, navigator.maxTouchPoints);

@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* `short:` — screens under 700px tall (iPhone SE, or an iPhone 13–15 in a Safari tab with its toolbars showing).
+   Full-screen flows shrink their big orb there so the bottom buttons (Baby!, Next) stay on screen. */
+@custom-variant short (@media (max-height: 700px));
+
 /* Sou Coach — warm Moroccan palette: cream, terracotta, mint tea, saffron */
 :root {
   --bg: #fbf5ec;
@@ -96,9 +100,49 @@ body {
   color: var(--ink);
 }
 
+/* No rubber-band / pull-to-refresh in a Safari tab: a stray downward swipe mid-session would reload the page */
+html {
+  overscroll-behavior-y: none;
+}
+
 body {
   font-family: var(--font-sans);
   -webkit-tap-highlight-color: transparent;
+  overflow-wrap: break-word; /* a long word, email or Darija line never pushes the page sideways */
+}
+
+@layer base {
+  /* One-handed taps (often holding the baby): no double-tap zoom on controls, and a thumb resting on a button
+     doesn't start a text selection or the iOS long-press callout */
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  label,
+  summary,
+  [role="button"],
+  [role="radio"],
+  [role="switch"] {
+    touch-action: manipulation;
+  }
+  button,
+  [role="button"],
+  nav a {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* iOS date fields: no grey native pill, value aligned like the other fields, and allowed to shrink in a grid */
+  input[type="date"] {
+    -webkit-appearance: none;
+    appearance: none;
+    min-width: 0;
+  }
+  input[type="date"]::-webkit-date-and-time-value {
+    text-align: start;
+  }
 }
 
 /* Subtle zellige star pattern */

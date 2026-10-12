@@ -258,6 +258,55 @@ describe("Speaker", () => {
     expect(started).toEqual(["first", "second"]);
   });
 
+  it("quiet modes: on silent, the clip waits until the silent media loop really plays (else iOS mutes Web Audio)", async () => {
+    const { played, tts } = fakeBrowser();
+    const events: string[] = [];
+    // play() starts for real a little later, like on a phone
+    const Base = (globalThis as unknown as { Audio: new () => { src: string; play(): Promise<void> } }).Audio;
+    class SlowAudio extends Base {
+      play() {
+        void super.play();
+        const src = this.src;
+        return new Promise<void>((resolve) =>
+          setTimeout(() => {
+            events.push(`playing ${src.startsWith("blob:") ? "silence" : src}`);
+            resolve();
+          }, 200),
+        );
+      }
+    }
+    class FakeContext {
+      state = "running";
+      destination = {};
+      resume = () => Promise.resolve();
+      decodeAudioData = async () => ({ duration: 1 });
+      createGain = () => ({ gain: { value: 1 }, connect() {}, disconnect() {} });
+      createBufferSource = () => ({
+        buffer: null,
+        onended: null as (() => void) | null,
+        connect() {},
+        disconnect() {},
+        stop() {},
+        start: () => events.push("clip"),
+      });
+    }
+    vi.stubGlobal("Audio", SlowAudio);
+    vi.stubGlobal("AudioContext", FakeContext);
+    const speaker = new Speaker(true);
+    speaker.volume = 0.6;
+    speaker.unlock();
+    await vi.advanceTimersByTimeAsync(300);
+    events.length = 0;
+    played.length = 0;
+    speaker.enqueue("Good night, Sou.");
+    tts[0].resolve(mp3());
+    await vi.advanceTimersByTimeAsync(100);
+    expect(played).toHaveLength(1); // the silent loop was asked to play first…
+    expect(events).toEqual([]); // …and the clip doesn't start before it plays
+    await vi.advanceTimersByTimeAsync(200);
+    expect(events).toEqual(["playing silence", "clip"]);
+  });
+
   it("keeps waiting while the engine is really still speaking", async () => {
     const { synth } = fakeBrowser();
     const speaker = new Speaker(false);

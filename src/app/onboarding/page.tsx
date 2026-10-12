@@ -62,6 +62,8 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
                   name="firstName"
                   required
                   maxLength={60}
+                  autoComplete="given-name"
+                  autoCapitalize="words"
                   defaultValue={profile?.first_name ?? member?.first_name ?? user.name ?? ""}
                   className={field}
                 />
@@ -73,6 +75,8 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
                   <input
                     name="babyName"
                     maxLength={60}
+                    autoComplete="off"
+                    autoCapitalize="words"
                     defaultValue={profile?.baby_name ?? ""}
                     className={`${field} min-h-[3.4rem]`}
                   />
@@ -103,7 +107,7 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
                         defaultChecked={profile?.why_english?.includes(reason.value)}
                         className="peer sr-only"
                       />
-                      <span className="flex items-center gap-1.5 rounded-full border border-line bg-card px-4 py-2.5 text-sm transition peer-checked:border-mint peer-checked:bg-mint-soft peer-checked:text-mint peer-focus-visible:ring-4 peer-focus-visible:ring-mint-soft">
+                      <span className="flex items-center gap-1.5 rounded-full border border-line bg-card px-4 py-3 text-sm transition peer-checked:border-mint peer-checked:bg-mint-soft peer-checked:text-mint peer-focus-visible:ring-4 peer-focus-visible:ring-mint-soft">
                         {reason.label} <span className="ar text-xs opacity-70">{reason.ar}</span>
                       </span>
                     </label>
@@ -118,7 +122,7 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
             {canSwitch && (
               <Link
                 href="/onboarding?as=partner"
-                className="mt-6 block text-center text-sm text-ink-soft underline-offset-4 hover:underline"
+                className="mt-4 block py-3 text-center text-sm text-ink-soft underline-offset-4 hover:underline"
               >
                 Not Sou? I&apos;m here to cheer her on →
               </Link>
@@ -141,6 +145,8 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
                   name="firstName"
                   required
                   maxLength={60}
+                  autoComplete="given-name"
+                  autoCapitalize="words"
                   defaultValue={member?.first_name ?? user.name ?? ""}
                   className={field}
                 />
@@ -152,7 +158,7 @@ export default async function OnboardingPage({ searchParams }: PageProps<"/onboa
             {canSwitch && (
               <Link
                 href="/onboarding?as=learner"
-                className="mt-6 block text-center text-sm text-ink-soft underline-offset-4 hover:underline"
+                className="mt-4 block py-3 text-center text-sm text-ink-soft underline-offset-4 hover:underline"
               >
                 I&apos;m Sou, the one learning English →
               </Link>

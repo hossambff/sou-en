@@ -230,8 +230,12 @@ function useRecorder() {
       recognition.current?.stop();
       const seconds = Math.min(options.maxSeconds, (performance.now() - startedAt) / 1000);
       const blob = new Blob(chunks, { type: rec.mimeType || mimeType || "audio/webm" });
-      // Give the phone's recogniser a moment to deliver its last words
-      window.setTimeout(() => options.onDone({ blob, seconds, transcript: heard.trim() }), options.listenAlong ? 400 : 0);
+      // Give the phone's recogniser a moment to deliver its last words. Then the mic closes: while it's open, iOS
+      // plays her take and Hossam's voice like a phone call (quiet); her next tap opens it again.
+      window.setTimeout(() => {
+        if (recorder.current === rec) release();
+        options.onDone({ blob, seconds, transcript: heard.trim() });
+      }, options.listenAlong ? 400 : 0);
     };
 
     recognition.current = null;

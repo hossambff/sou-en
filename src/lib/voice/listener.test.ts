@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Listener, sttFailure, type ListenResult } from "./listener";
+import { Listener, micProblem, sttFailure, type ListenResult } from "./listener";
 import { turnPauseMs } from "./turn";
 
 function fakeTrack() {
@@ -20,7 +20,14 @@ function fakeStream() {
 
 /** Mic, Web Audio and MediaRecorder fakes. `level` is what the mic "hears" right now. */
 function fakeMic() {
-  const state = { level: 0, streams: [] as ReturnType<typeof fakeStream>[], pending: [] as Array<() => void> };
+  const state = {
+    level: 0,
+    streams: [] as ReturnType<typeof fakeStream>[],
+    pending: [] as Array<() => void>,
+    contexts: [] as FakeAudioContext[],
+    /** What resume() of a context does: settle (it runs again), or hang (iOS still interrupted by a call) */
+    resumes: "run" as "run" | "hang",
+  };
   const getUserMedia = vi.fn(
     () =>
       new Promise((resolve) => {
@@ -33,12 +40,23 @@ function fakeMic() {
   );
   class FakeAudioContext {
     state = "running";
-    resume = () => Promise.resolve();
+    constructor() {
+      state.contexts.push(this);
+    }
+    resume = vi.fn(() => {
+      if (state.resumes === "hang" && this.state !== "running") return new Promise<void>(() => {});
+      this.state = "running";
+      return Promise.resolve();
+    });
+    suspend = vi.fn(() => {
+      this.state = "suspended";
+      return Promise.resolve();
+    });
     close = vi.fn(() => {
       this.state = "closed";
       return Promise.resolve();
     });
-    createMediaStreamSource = () => ({ connect: () => {} });
+    createMediaStreamSource = () => ({ connect: () => {}, disconnect: () => {} });
     createAnalyser = () => ({
       fftSize: 1024,
       getFloatTimeDomainData: (data: Float32Array) => data.fill(state.level),
@@ -65,6 +83,16 @@ function fakeMic() {
   vi.stubGlobal("MediaRecorder", FakeRecorder);
   return { state, getUserMedia, grant: () => state.pending.shift()?.() };
 }
+
+describe("micProblem", () => {
+  it("tells a refused mic from one a call or another app holds", () => {
+    expect(micProblem(new DOMException("denied", "NotAllowedError"))).toBe("blocked");
+    expect(micProblem(new DOMException("in use", "NotReadableError"))).toBe("busy");
+    expect(micProblem(new DOMException("aborted", "AbortError"))).toBe("busy");
+    expect(micProblem(new DOMException("none", "NotFoundError"))).toBe("other");
+    expect(micProblem(undefined)).toBe("other");
+  });
+});
 
 describe("sttFailure", () => {
   it("tells a failure apart from silence", () => {
@@ -116,6 +144,55 @@ describe("Listener", () => {
     mic.grant();
     await second;
     expect(mic.getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it("releaseMic() closes the mic between turns; the next init() opens it again on the same AudioContext", async () => {
+    const mic = fakeMic();
+    const listener = new Listener(true);
+    const first = listener.init();
+    mic.grant();
+    await first;
+    const context = listener.audioContext;
+    expect(listener.micOpen).toBe(true);
+    listener.releaseMic();
+    expect(mic.state.streams[0].track.stop).toHaveBeenCalled();
+    expect(listener.mediaStream).toBeNull();
+    expect(listener.micOpen).toBe(false);
+    expect(context?.state).toBe("suspended"); // kept (the capture worklet stays loaded), not closed
+    const second = listener.init();
+    mic.grant();
+    await second;
+    expect(mic.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(listener.audioContext).toBe(context);
+    expect(context?.state).toBe("running");
+    expect(mic.state.contexts).toHaveLength(1);
+  });
+
+  it("a kept AudioContext that won't run again (iOS still interrupted) is replaced by a new one", async () => {
+    const mic = fakeMic();
+    const listener = new Listener(true);
+    const first = listener.init();
+    mic.grant();
+    await first;
+    listener.releaseMic();
+    mic.state.resumes = "hang";
+    const second = listener.init();
+    mic.grant();
+    await vi.advanceTimersByTimeAsync(600);
+    await second;
+    expect(mic.state.contexts).toHaveLength(2);
+    expect(mic.state.contexts[0].close).toHaveBeenCalled();
+    expect(listener.audioContext).toBe(mic.state.contexts[1]);
+  });
+
+  it("releaseMic() ends a listen still running as silence", async () => {
+    const mic = fakeMic();
+    const listener = new Listener(true);
+    const heard = listener.hear({ whisper: false });
+    mic.grant();
+    await vi.advanceTimersByTimeAsync(100);
+    listener.releaseMic();
+    expect(await heard).toEqual({ kind: "silence" });
   });
 
   /** She talks for a bit, then stays quiet; the recording goes to /api/stt which answers `response`. */

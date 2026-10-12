@@ -42,7 +42,7 @@ export function StartPanel({ defaultMinutes = 5, plan }: { defaultMinutes?: numb
       <section className="rounded-[2rem] border border-line bg-card p-5 shadow-card animate-rise [animation-delay:40ms]">
         <Link
           href={sessionHref({ activity: "chat", minutes, mode })}
-          className="group flex flex-col items-center gap-4 rounded-3xl py-4 outline-none focus-visible:ring-4 focus-visible:ring-terra-soft"
+          className="group flex select-none flex-col items-center gap-4 rounded-3xl py-4 outline-none [-webkit-touch-callout:none] focus-visible:ring-4 focus-visible:ring-terra-soft"
         >
           <span className="relative grid size-36 place-items-center">
             <span className="absolute inset-0 rounded-full bg-terra/25 animate-ripple" />

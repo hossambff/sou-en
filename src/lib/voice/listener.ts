@@ -48,6 +48,20 @@ export function sttFailure(status: number, seconds: number): ListenResult {
   return { kind: "failed", reason: "service", status, switchedToPhone: false };
 }
 
+/**
+ * Why getUserMedia failed (pure): "blocked" = she (or the browser's settings) refused the mic; "busy" = a phone
+ * call or another app holds it (iOS: NotReadableError / AbortError); "other" = no mic, or anything else.
+ */
+export function micProblem(error: unknown): "blocked" | "busy" | "other" {
+  const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
+  if (name === "NotAllowedError" || name === "SecurityError" || name === "PermissionDeniedError") return "blocked";
+  if (name === "NotReadableError" || name === "AbortError" || name === "TrackStartError") return "busy";
+  return "other";
+}
+
+/** A kept AudioContext's resume() may never settle on iOS (still interrupted by a call): don't wait long. */
+const RESUME_WAIT_MS = 500;
+
 type Recognition = {
   lang: string;
   interimResults: boolean;
@@ -70,6 +84,7 @@ function browserRecognition() {
 export class Listener {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
   private cancelCurrent: (() => void) | null = null;
   private finishCurrent: (() => void) | null = null;
@@ -95,6 +110,11 @@ export class Listener {
   /** The AudioContext the mic is attached to after init() (the realtime capture adds its worklet here). */
   get audioContext(): AudioContext | null {
     return this.context;
+  }
+
+  /** True while the mic is open and usable (after init(), until releaseMic(), dispose() or its track ending). */
+  get micOpen() {
+    return this.isLive();
   }
 
   /** Ask for the mic (call from a tap). Concurrent calls share one request; a dead mic is re-acquired. */
@@ -123,7 +143,7 @@ export class Listener {
   }
 
   private async acquire(epoch: number) {
-    this.release(); // a stream whose track ended (a phone call took the mic) can't record any more
+    this.closeMic(); // a stream whose track ended (a phone call took the mic) can't record any more
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
@@ -131,8 +151,7 @@ export class Listener {
       stream.getTracks().forEach((track) => track.stop());
       throw new Error("The listener was closed");
     }
-    const context = new AudioContext();
-    await context.resume().catch(() => {});
+    const context = await this.runningContext();
     if (epoch !== this.epoch) {
       stream.getTracks().forEach((track) => track.stop());
       void context.close().catch(() => {});
@@ -144,15 +163,53 @@ export class Listener {
     source.connect(analyser);
     this.stream = stream;
     this.context = context;
+    this.source = source;
     this.analyser = analyser;
   }
 
-  private release() {
-    this.stream?.getTracks().forEach((track) => track.stop());
-    void this.context?.close().catch(() => {});
-    this.stream = null;
+  /**
+   * The AudioContext of an earlier turn while it can still run (the capture worklet is loaded there), else a new
+   * one. Runs with the mic already open: iOS lets a page that is capturing start audio without a tap.
+   */
+  private async runningContext(): Promise<AudioContext> {
+    const kept = this.context;
+    if (kept && kept.state !== "closed") {
+      await Promise.race([kept.resume().catch(() => {}), new Promise((resolve) => setTimeout(resolve, RESUME_WAIT_MS))]);
+      if (kept.state === "running") return kept;
+      void kept.close().catch(() => {});
+    }
     this.context = null;
+    const context = new AudioContext();
+    await context.resume().catch(() => {});
+    return context;
+  }
+
+  /** Stops the mic's tracks (the AudioContext stays). */
+  private closeMic() {
+    this.stream?.getTracks().forEach((track) => track.stop());
+    try {
+      this.source?.disconnect();
+    } catch {}
+    this.stream = null;
+    this.source = null;
     this.analyser = null;
+  }
+
+  private release() {
+    this.closeMic();
+    void this.context?.close().catch(() => {});
+    this.context = null;
+  }
+
+  /**
+   * Lets go of the mic until the next init() or hear() opens it again (cancels a listen still running). While the
+   * mic is open, iOS plays everything like a phone call (quieter, at times from the earpiece, AirPods in call
+   * quality), so screens close it while Hossam talks. The AudioContext is only suspended, ready for the next turn.
+   */
+  releaseMic() {
+    this.cancel();
+    this.closeMic();
+    if (this.context?.state === "running") void this.context.suspend().catch(() => {});
   }
 
   /** Clears the stop handlers, but only if they still belong to the listen that is ending. */

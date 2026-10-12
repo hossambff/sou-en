@@ -7,6 +7,7 @@ import { Speaker } from "@/lib/voice/speaker";
 import { Listener } from "@/lib/voice/listener";
 import type { QuickAnswer } from "@/app/api/translate/answer";
 import { MIC_NOTICE, listenNotice, type Notice } from "@/app/drill/listen-notice";
+import { useVisibleArea } from "@/components/visible-area";
 
 /** Query parameter that opens the sheet on arrival (home-screen shortcut: /practice?ask=1). */
 export const ASK_PARAM = "ask";
@@ -144,6 +145,8 @@ function QuickAskSheet({
   const listener = useRef<{ instance: Listener; server: boolean } | null>(null);
   const turn = useRef(0);
   const sheet = useRef<HTMLDivElement>(null);
+  // iPhone keyboard open: sit in the space above it, not under it
+  const area = useVisibleArea();
 
   // Does the server transcribe audio (Darija + French + English mixed)? Otherwise use the phone's recognizer.
   useEffect(() => {
@@ -178,6 +181,13 @@ function QuickAskSheet({
       target?.focus({ preventScroll: true });
     };
   }, [returnFocus]);
+
+  // When the keyboard opens, keep the text box and its send button in view (they're at the bottom of the sheet)
+  useEffect(() => {
+    const box = sheet.current;
+    const field = document.activeElement;
+    if (area && box && field instanceof HTMLTextAreaElement && box.contains(field)) box.scrollTop = box.scrollHeight;
+  }, [area]);
 
   // Close on Escape
   useEffect(() => {
@@ -250,6 +260,8 @@ function QuickAskSheet({
       },
     });
     if (myTurn !== turn.current) return;
+    // Her question is in: close the mic (while it's open, iOS plays Hossam's answer like a phone call, quiet)
+    mic.releaseMic();
     if (heard.kind !== "heard") {
       if (heard.kind === "failed" && heard.switchedToPhone) setPhoneStt(true);
       const notice = listenNotice(heard);
@@ -266,7 +278,7 @@ function QuickAskSheet({
     const question = raw.trim().slice(0, MAX_CHARS);
     if (!question) return;
     const myTurn = ++turn.current;
-    listener.current?.instance.cancel();
+    listener.current?.instance.releaseMic(); // stops a listen still running; the answer plays without the mic open
     setStatus("thinking");
     setError(null);
     setHint(null);
@@ -330,7 +342,10 @@ function QuickAskSheet({
   const canSave = answer !== null && asTerm(answer.english).length > 0 && asTerm(answer.english).length <= 120;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center">
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center"
+      style={area ? { top: area.top, height: area.height, bottom: "auto" } : undefined}
+    >
       <button
         type="button"
         aria-hidden="true"
@@ -345,8 +360,12 @@ function QuickAskSheet({
         aria-labelledby="quick-ask-title"
         tabIndex={-1}
         onKeyDown={trapTab}
-        className="relative max-h-[92dvh] w-full max-w-md overflow-y-auto rounded-t-[2rem] border border-line bg-bg px-5 pt-3 text-ink shadow-card outline-none animate-rise"
-        style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom))" }}
+        className="relative max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-[2rem] border border-line bg-bg px-5 pt-3 text-ink shadow-card outline-none animate-rise"
+        style={
+          area
+            ? { maxHeight: Math.round(area.height * 0.92), paddingBottom: "1.25rem" } // the keyboard covers the home indicator
+            : { paddingBottom: "max(1.25rem, env(safe-area-inset-bottom))" }
+        }
       >
         <div className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-line" aria-hidden />
         <header className="flex items-start justify-between gap-3">
@@ -553,6 +572,7 @@ function QuickAskSheet({
                 id="quick-ask-text"
                 dir="auto"
                 rows={2}
+                enterKeyHint="send"
                 maxLength={MAX_CHARS}
                 value={text}
                 onChange={(event) => setText(event.target.value)}
